@@ -5,7 +5,8 @@ import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.m
 // ==========================================
 
 const MAX_DISTANCE = 6;
-const ROOM_CAPTURE_DELAY = 2800;
+const ROCK_HOLD_TIME = 700;
+const ROCK_COOLDOWN = 5000;
 
 // ==========================================
 // ELEMENTS
@@ -30,11 +31,7 @@ let session = null;
 let referenceSpace = null;
 
 let isRunning = false;
-let isRescanning = false;
-
-let roomCaptureTimer = null;
 let roomCaptureAttempted = false;
-let forceRoomCaptureOnStart = false;
 
 let roomCaptureStatus = "Non déclenché";
 let enabledFeatures = [];
@@ -42,8 +39,9 @@ let enabledFeatures = [];
 let latestPlaneCount = 0;
 let latestMeshCount = 0;
 
-let overlayRoot = null;
-let rescanButton = null;
+let rockStartTime = null;
+let lastRockTime = 0;
+let rockDetected = false;
 
 const planeVisuals = new Map();
 const meshVisuals = new Map();
@@ -110,91 +108,6 @@ function createDepthMaterial() {
 }
 
 // ==========================================
-// INTERFACE RESCAN
-// ==========================================
-
-function createRescanButton() {
-    if (overlayRoot) return;
-
-    overlayRoot = document.createElement("div");
-
-    Object.assign(overlayRoot.style, {
-        position: "fixed",
-        inset: "0",
-        pointerEvents: "none",
-        zIndex: "100000"
-    });
-
-    rescanButton = document.createElement("button");
-
-    rescanButton.textContent = "↻ RESCAN";
-
-    Object.assign(rescanButton.style, {
-        position: "absolute",
-        top: "20px",
-        right: "20px",
-        padding: "16px 24px",
-        background: "#ffffff",
-        color: "#000000",
-        border: "2px solid #777",
-        borderRadius: "12px",
-        fontSize: "18px",
-        fontWeight: "bold",
-        pointerEvents: "auto",
-        cursor: "pointer"
-    });
-
-    rescanButton.addEventListener("click", rescanRoom);
-
-    overlayRoot.appendChild(rescanButton);
-    document.body.appendChild(overlayRoot);
-}
-
-function setRescanButtonVisible(visible) {
-    if (overlayRoot) {
-        overlayRoot.style.display = visible ? "block" : "none";
-    }
-}
-
-// ==========================================
-// RESCAN
-// ==========================================
-
-async function rescanRoom() {
-    if (!session || !isRunning || isRescanning) return;
-
-    isRescanning = true;
-
-    if (rescanButton) {
-        rescanButton.disabled = true;
-        rescanButton.textContent = "RESCAN...";
-    }
-
-    messageElement.textContent =
-        "Préparation d'une nouvelle capture...";
-
-    statusElement.textContent = "Rescannage";
-
-    if (roomCaptureTimer !== null) {
-        clearTimeout(roomCaptureTimer);
-        roomCaptureTimer = null;
-    }
-
-    try {
-        await session.end();
-    } catch (error) {
-        console.error("Erreur pendant le rescannage :", error);
-
-        isRescanning = false;
-
-        if (rescanButton) {
-            rescanButton.disabled = false;
-            rescanButton.textContent = "↻ RESCAN";
-        }
-    }
-}
-
-// ==========================================
 // DIAGNOSTIC
 // ==========================================
 
@@ -204,17 +117,15 @@ function logCapabilities() {
     console.log("XR activé :", !!navigator.xr);
 
     console.log(
-        "Fonction Room Capture :",
+        "Room Capture :",
         typeof session?.initiateRoomCapture === "function"
     );
 
-    console.log("Fonctionnalités activées :", enabledFeatures);
+    console.log("Fonctionnalités :", enabledFeatures);
 
     console.log(
-        "Repère spatial :",
-        enabledFeatures.includes("unbounded")
-            ? "unbounded"
-            : "local-floor"
+        "Hand Tracking :",
+        enabledFeatures.includes("hand-tracking")
     );
 
     console.log(
@@ -223,6 +134,214 @@ function logCapabilities() {
     );
 
     console.groupEnd();
+}
+
+// ==========================================
+// DÉTECTION DU GESTE ROCK
+// ==========================================
+
+function getJointPosition(frame, hand, jointName) {
+    const joint = hand.get(jointName);
+
+    if (!joint) return null;
+
+    const pose = frame.getJointPose(
+        joint,
+        referenceSpace
+    );
+
+    if (!pose) return null;
+
+    const p = pose.transform.position;
+
+    return new THREE.Vector3(p.x, p.y, p.z);
+}
+
+function distanceBetween(a, b) {
+    if (!a || !b) return 0;
+
+    return a.distanceTo(b);
+}
+
+function isFingerExtended(
+    frame,
+    hand,
+    wrist,
+    proximalName,
+    tipName
+) {
+    const proximal = getJointPosition(
+        frame,
+        hand,
+        proximalName
+    );
+
+    const tip = getJointPosition(
+        frame,
+        hand,
+        tipName
+    );
+
+    if (!proximal || !tip) return false;
+
+    const baseDistance = distanceBetween(
+        wrist,
+        proximal
+    );
+
+    const tipDistance = distanceBetween(
+        wrist,
+        tip
+    );
+
+    return tipDistance > baseDistance * 1.18;
+}
+
+function isFingerCurled(
+    frame,
+    hand,
+    wrist,
+    proximalName,
+    tipName
+) {
+    const proximal = getJointPosition(
+        frame,
+        hand,
+        proximalName
+    );
+
+    const tip = getJointPosition(
+        frame,
+        hand,
+        tipName
+    );
+
+    if (!proximal || !tip) return false;
+
+    const baseDistance = distanceBetween(
+        wrist,
+        proximal
+    );
+
+    const tipDistance = distanceBetween(
+        wrist,
+        tip
+    );
+
+    return tipDistance < baseDistance * 1.18;
+}
+
+function detectRockGesture(frame) {
+    if (!enabledFeatures.includes("hand-tracking")) {
+        return false;
+    }
+
+    const inputSources = session.inputSources;
+
+    for (const source of inputSources) {
+        if (!source.hand) continue;
+
+        const hand = source.hand;
+
+        const wrist = getJointPosition(
+            frame,
+            hand,
+            "wrist"
+        );
+
+        if (!wrist) continue;
+
+        const indexExtended = isFingerExtended(
+            frame,
+            hand,
+            wrist,
+            "index-finger-phalanx-proximal",
+            "index-finger-tip"
+        );
+
+        const middleCurled = isFingerCurled(
+            frame,
+            hand,
+            wrist,
+            "middle-finger-phalanx-proximal",
+            "middle-finger-tip"
+        );
+
+        const ringCurled = isFingerCurled(
+            frame,
+            hand,
+            wrist,
+            "ring-finger-phalanx-proximal",
+            "ring-finger-tip"
+        );
+
+        const pinkyExtended = isFingerExtended(
+            frame,
+            hand,
+            wrist,
+            "pinky-finger-phalanx-proximal",
+            "pinky-finger-tip"
+        );
+
+        if (
+            indexExtended &&
+            middleCurled &&
+            ringCurled &&
+            pinkyExtended
+        ) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// ==========================================
+// GESTION DU GESTE ROCK
+// ==========================================
+
+function updateRockGesture(frame, time) {
+    const detected = detectRockGesture(frame);
+
+    if (!detected) {
+        rockStartTime = null;
+        rockDetected = false;
+        return;
+    }
+
+    if (rockStartTime === null) {
+        rockStartTime = time;
+    }
+
+    const heldDuration = time - rockStartTime;
+
+    if (
+        heldDuration >= ROCK_HOLD_TIME &&
+        !rockDetected &&
+        time - lastRockTime > ROCK_COOLDOWN
+    ) {
+        rockDetected = true;
+        lastRockTime = time;
+
+        triggerRockAction();
+    }
+}
+
+function triggerRockAction() {
+    console.log("🤘 GESTE ROCK DÉTECTÉ");
+
+    if (!roomCaptureAttempted) {
+        initiateRoomCapture();
+        return;
+    }
+
+    roomCaptureStatus =
+        "Capture déjà demandée pendant cette session.";
+
+    messageElement.textContent =
+        "🤘 Geste détecté. La capture a déjà été demandée. Une nouvelle session sera nécessaire pour la relancer.";
+
+    console.info(roomCaptureStatus);
 }
 
 // ==========================================
@@ -483,26 +602,21 @@ async function initiateRoomCapture() {
 
     roomCaptureAttempted = true;
 
-    if (
-        latestPlaneCount > 0 &&
-        !forceRoomCaptureOnStart
-    ) {
-        roomCaptureStatus =
-            "Plans déjà détectés : capture automatique ignorée.";
-
-        console.info(roomCaptureStatus);
-        return;
-    }
-
     if (typeof session.initiateRoomCapture !== "function") {
         roomCaptureStatus =
             "API initiateRoomCapture indisponible.";
+
+        messageElement.textContent =
+            "Room Capture n'est pas disponible dans cette session.";
 
         console.warn(roomCaptureStatus);
         return;
     }
 
     roomCaptureStatus = "Demande de capture envoyée.";
+
+    messageElement.textContent =
+        "🤘 Demande de capture envoyée à Meta Quest.";
 
     console.info(
         "Demande de Room Capture envoyée à Meta Quest."
@@ -516,18 +630,19 @@ async function initiateRoomCapture() {
         }
 
         roomCaptureStatus =
-            "Demande envoyée : termine la configuration de la pièce si elle apparaît.";
+            "Demande envoyée. Termine la capture si une interface apparaît.";
 
-        console.info(roomCaptureStatus);
+        messageElement.textContent =
+            "Capture demandée. Suis les instructions du Quest.";
 
     } catch (error) {
         roomCaptureStatus =
             "Erreur Room Capture : " + error.message;
 
-        console.error(
-            "Erreur initiateRoomCapture :",
-            error
-        );
+        messageElement.textContent =
+            roomCaptureStatus;
+
+        console.error(error);
     }
 }
 
@@ -535,15 +650,11 @@ async function initiateRoomCapture() {
 // DÉMARRAGE DU SCANNER
 // ==========================================
 
-async function enterAR(forceCapture = false) {
+async function enterAR() {
     startButton.disabled = true;
 
-    forceRoomCaptureOnStart = forceCapture;
-
     messageElement.textContent =
-        forceCapture
-            ? "Relancement de la capture spatiale..."
-            : "Initialisation du scanner et des capacités spatiales...";
+        "Initialisation du scanner...";
 
     roomCaptureAttempted = false;
     roomCaptureStatus = "En attente";
@@ -551,9 +662,10 @@ async function enterAR(forceCapture = false) {
     latestPlaneCount = 0;
     latestMeshCount = 0;
 
-    try {
-        createRescanButton();
+    rockStartTime = null;
+    rockDetected = false;
 
+    try {
         session = await navigator.xr.requestSession(
             "immersive-ar",
             {
@@ -565,13 +677,8 @@ async function enterAR(forceCapture = false) {
                 optionalFeatures: [
                     "unbounded",
                     "mesh-detection",
-                    "hand-tracking",
-                    "dom-overlay"
-                ],
-
-                domOverlay: {
-                    root: overlayRoot
-                }
+                    "hand-tracking"
+                ]
             }
         );
 
@@ -639,51 +746,24 @@ async function enterAR(forceCapture = false) {
         document.body.classList.add("xr-active");
 
         isRunning = true;
-        isRescanning = false;
-
-        setRescanButtonVisible(true);
-
-        if (rescanButton) {
-            rescanButton.disabled = false;
-            rescanButton.textContent = "↻ RESCAN";
-        }
 
         statusElement.textContent = "Scanner actif";
 
-        roomCaptureStatus =
-            typeof session.initiateRoomCapture === "function"
-                ? "API disponible"
-                : "API indisponible";
-
         logCapabilities();
 
-        roomCaptureTimer = setTimeout(
-            initiateRoomCapture,
-            ROOM_CAPTURE_DELAY
-        );
+        if (enabledFeatures.includes("hand-tracking")) {
+            messageElement.textContent =
+                "Scanner actif. Fais le signe 🤘 et maintiens-le pour demander une capture.";
+        } else {
+            messageElement.textContent =
+                "Hand Tracking indisponible. Vérifie les autorisations du Quest.";
+        }
 
-        session.addEventListener("end", () => {
-            if (isRescanning) {
-                isRunning = false;
-                session = null;
-
-                console.info(
-                    "Ancienne session terminée. Relancement du scanner."
-                );
-
-                enterAR(true);
-                return;
-            }
-
-            stopAR();
-        }, { once: true });
+        session.addEventListener("end", stopAR, {
+            once: true
+        });
 
         renderer.setAnimationLoop(renderFrame);
-
-        messageElement.textContent =
-            forceCapture
-                ? "Nouvelle session active. Demande de capture en préparation."
-                : "Scanner actif. Attends la détection de la pièce.";
 
     } catch (error) {
         console.error(error);
@@ -697,10 +777,6 @@ async function enterAR(forceCapture = false) {
             } catch (_) {}
         }
 
-        if (isRescanning) {
-            isRescanning = false;
-        }
-
         if (renderer) {
             renderer.setAnimationLoop(null);
             renderer.dispose();
@@ -711,8 +787,6 @@ async function enterAR(forceCapture = false) {
         if (scene) {
             disposeScene();
         }
-
-        setRescanButtonVisible(false);
 
         startButton.disabled = false;
     }
@@ -736,6 +810,10 @@ function renderFrame(time, frame) {
         viewerPose.transform.position.y,
         viewerPose.transform.position.z
     );
+
+    // Détection du geste à chaque frame.
+
+    updateRockGesture(frame, time);
 
     const planes = frame.detectedPlanes
         ? Array.from(frame.detectedPlanes)
@@ -784,7 +862,7 @@ function renderFrame(time, frame) {
 }
 
 // ==========================================
-// NETTOYAGE DE LA SCÈNE
+// NETTOYAGE
 // ==========================================
 
 function disposeScene() {
@@ -792,14 +870,12 @@ function disposeScene() {
 
     for (const visual of planeVisuals.values()) {
         scene.remove(visual.group);
-
         visual.mesh.geometry.dispose();
         visual.mesh.material.dispose();
     }
 
     for (const visual of meshVisuals.values()) {
         scene.remove(visual.group);
-
         visual.mesh.geometry.dispose();
         visual.mesh.material.dispose();
     }
@@ -812,26 +888,17 @@ function disposeScene() {
 }
 
 // ==========================================
-// ARRÊT FINAL
+// ARRÊT
 // ==========================================
 
 function stopAR() {
     isRunning = false;
-    isRescanning = false;
-
-    if (roomCaptureTimer !== null) {
-        clearTimeout(roomCaptureTimer);
-        roomCaptureTimer = null;
-    }
-
-    const finalPlaneCount = planeVisuals.size;
-    const finalMeshCount = meshVisuals.size;
 
     const report =
         `Room Capture : ${roomCaptureStatus}\n` +
-        `Plans conservés : ${finalPlaneCount}\n` +
-        `Maillages conservés : ${finalMeshCount}\n` +
-        `Fonctionnalités activées : ${enabledFeatures.join(", ") || "non communiquées"}`;
+        `Plans conservés : ${planeVisuals.size}\n` +
+        `Maillages conservés : ${meshVisuals.size}\n` +
+        `Fonctionnalités : ${enabledFeatures.join(", ") || "non communiquées"}`;
 
     console.info("RAPPORT FINAL DU SCAN");
     console.info(report);
@@ -848,12 +915,6 @@ function stopAR() {
         renderer = null;
     }
 
-    if (overlayRoot) {
-        overlayRoot.remove();
-        overlayRoot = null;
-        rescanButton = null;
-    }
-
     camera = null;
     session = null;
     referenceSpace = null;
@@ -863,7 +924,6 @@ function stopAR() {
     startButton.disabled = false;
 
     statusElement.textContent = "Scan terminé";
-
     messageElement.textContent = report;
 
     planeCountElement.textContent = "0";
@@ -892,7 +952,7 @@ window.addEventListener("resize", () => {
 // INITIALISATION
 // ==========================================
 
-startButton.addEventListener("click", () => enterAR(false));
+startButton.addEventListener("click", enterAR);
 
 checkSupport();
 
@@ -915,9 +975,7 @@ async function checkSupport() {
         }
 
         statusElement.textContent = "WebXR détecté";
-
-        messageElement.textContent =
-            "Scanner prêt.";
+        messageElement.textContent = "Scanner prêt.";
 
         startButton.disabled = false;
 
