@@ -1,5 +1,5 @@
-import * as THREE from
-    "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
+
+import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
 
 // ==========================================
 // ELEMENTS
@@ -18,11 +18,11 @@ const nearestDistanceElement = $("nearestDistance");
 // VARIABLES
 // ==========================================
 
-let renderer;
-let scene;
-let camera;
-let session;
-let referenceSpace;
+let renderer = null;
+let scene = null;
+let camera = null;
+let session = null;
+let referenceSpace = null;
 
 const planeVisuals = new Map();
 
@@ -35,12 +35,9 @@ let isRunning = false;
 async function checkSupport() {
 
     if (!navigator.xr) {
-
         statusElement.textContent = "WebXR indisponible";
-
         messageElement.textContent =
             "Ouvre ce site dans Meta Quest Browser.";
-
         return;
     }
 
@@ -54,7 +51,6 @@ async function checkSupport() {
         }
 
         statusElement.textContent = "WebXR détecté";
-
         startButton.disabled = false;
 
         messageElement.textContent =
@@ -98,8 +94,6 @@ function createLabel() {
     canvas.width = 512;
     canvas.height = 128;
 
-    const ctx = canvas.getContext("2d");
-
     const texture = new THREE.CanvasTexture(canvas);
 
     const material = new THREE.SpriteMaterial({
@@ -120,7 +114,6 @@ function createLabel() {
 function drawLabel(sprite, text) {
 
     const canvas = sprite.material.map.image;
-
     const ctx = canvas.getContext("2d");
 
     ctx.clearRect(0, 0, 512, 128);
@@ -130,22 +123,12 @@ function drawLabel(sprite, text) {
     ctx.lineWidth = 5;
 
     ctx.beginPath();
-
-    ctx.roundRect(
-        5,
-        5,
-        502,
-        118,
-        24
-    );
-
+    ctx.roundRect(5, 5, 502, 118, 24);
     ctx.fill();
     ctx.stroke();
 
     ctx.fillStyle = "#ffffff";
-
     ctx.font = "bold 54px Arial";
-
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
 
@@ -165,12 +148,9 @@ function createPlaneVisual() {
     const meshMaterial = new THREE.MeshBasicMaterial({
 
         color: 0x5cf0c0,
-
         transparent: true,
         opacity: 0.15,
-
         side: THREE.DoubleSide,
-
         depthWrite: false
 
     });
@@ -178,7 +158,6 @@ function createPlaneVisual() {
     const lineMaterial = new THREE.LineBasicMaterial({
 
         color: 0x5cf0c0,
-
         transparent: true,
         opacity: 0.95
 
@@ -221,7 +200,6 @@ function updatePlane(plane, frame, viewerPosition) {
     if (!visual) {
 
         visual = createPlaneVisual();
-
         planeVisuals.set(plane, visual);
 
     }
@@ -238,13 +216,15 @@ function updatePlane(plane, frame, viewerPosition) {
     ) {
 
         visual.group.visible = false;
-
         return null;
+
     }
 
     const matrix = new THREE.Matrix4().fromArray(
         pose.transform.matrix
     );
+
+    // Polygon points in plane-local coordinates
 
     const points = plane.polygon.map(point => {
 
@@ -256,7 +236,9 @@ function updatePlane(plane, frame, viewerPosition) {
 
     });
 
-    // Mesh geometry
+    // ======================================
+    // CREATE MESH
+    // ======================================
 
     const positions = [];
 
@@ -269,8 +251,6 @@ function updatePlane(plane, frame, viewerPosition) {
         );
 
     }
-
-    // Polygon triangulation
 
     const indices = [];
 
@@ -288,52 +268,55 @@ function updatePlane(plane, frame, viewerPosition) {
     );
 
     geometry.setIndex(indices);
-
     geometry.computeVertexNormals();
 
     visual.mesh.geometry.dispose();
-
     visual.mesh.geometry = geometry;
 
-    // Surface outline
+    // ======================================
+    // CREATE OUTLINE
+    // ======================================
+
+    const linePoints = [...points, points[0]];
 
     const lineGeometry = new THREE.BufferGeometry()
-        .setFromPoints(points);
+        .setFromPoints(linePoints);
 
     visual.line.geometry.dispose();
-
     visual.line.geometry = lineGeometry;
 
-    // Apply spatial transform
+    // ======================================
+    // APPLY SPATIAL TRANSFORM
+    // ======================================
 
     visual.group.matrixAutoUpdate = false;
-
     visual.group.matrix.copy(matrix);
-
     visual.group.matrixWorldNeedsUpdate = true;
 
     visual.group.visible = true;
 
-    // Calculate world-space center
+    // ======================================
+    // CALCULATE CENTER
+    // ======================================
 
-    const worldPoints = points.map(point => {
-
-        return point.clone().applyMatrix4(matrix);
-
-    });
-
-    const center = worldPoints.reduce(
+    const localCenter = points.reduce(
         (sum, point) => sum.add(point),
         new THREE.Vector3()
-    ).multiplyScalar(1 / worldPoints.length);
+    ).multiplyScalar(1 / points.length);
 
-    // WebXR plane space normal: local Y axis
+    const center = localCenter.clone().applyMatrix4(matrix);
+
+    // ======================================
+    // CALCULATE PLANE NORMAL
+    // ======================================
 
     const normal = new THREE.Vector3(0, 1, 0)
         .transformDirection(matrix)
         .normalize();
 
-    // Perpendicular distance to the infinite plane
+    // ======================================
+    // CALCULATE DISTANCE
+    // ======================================
 
     const distance = Math.abs(
         viewerPosition.clone()
@@ -341,12 +324,14 @@ function updatePlane(plane, frame, viewerPosition) {
             .dot(normal)
     );
 
-    // Update label
+    // ======================================
+    // UPDATE LABEL
+    // ======================================
 
-    visual.label.position.copy(center);
+    visual.label.position.copy(localCenter);
 
     visual.label.position.add(
-        normal.clone().multiplyScalar(0.03)
+        new THREE.Vector3(0, 0.03, 0)
     );
 
     drawLabel(
@@ -354,12 +339,13 @@ function updatePlane(plane, frame, viewerPosition) {
         distance.toFixed(2) + " m"
     );
 
-    // Update colors
+    // ======================================
+    // UPDATE COLORS
+    // ======================================
 
     const color = getDistanceColor(distance);
 
     visual.mesh.material.color.setHex(color);
-
     visual.line.material.color.setHex(color);
 
     return distance;
@@ -428,7 +414,9 @@ async function enterAR() {
 
         if (!referenceSpace) {
 
-            throw new Error("Impossible d'obtenir l'espace de référence.");
+            throw new Error(
+                "Impossible d'obtenir l'espace de référence."
+            );
 
         }
 
@@ -488,15 +476,12 @@ function stopAR() {
         for (const visual of planeVisuals.values()) {
 
             visual.mesh.geometry.dispose();
-
             visual.line.geometry.dispose();
 
             visual.mesh.material.dispose();
-
             visual.line.material.dispose();
 
             visual.label.material.map.dispose();
-
             visual.label.material.dispose();
 
         }
@@ -508,6 +493,9 @@ function stopAR() {
     planeVisuals.clear();
 
     session = null;
+    referenceSpace = null;
+    scene = null;
+    camera = null;
 
     document.body.classList.remove("xr-active");
 
@@ -543,9 +531,7 @@ function renderFrame(time, frame) {
     const viewerPosition = new THREE.Vector3(
 
         viewerPose.transform.position.x,
-
         viewerPose.transform.position.y,
-
         viewerPose.transform.position.z
 
     );
@@ -586,15 +572,12 @@ function renderFrame(time, frame) {
             scene.remove(visual.group);
 
             visual.mesh.geometry.dispose();
-
             visual.line.geometry.dispose();
 
-            visual.label.material.map.dispose();
-
             visual.mesh.material.dispose();
-
             visual.line.material.dispose();
 
+            visual.label.material.map.dispose();
             visual.label.material.dispose();
 
             planeVisuals.delete(plane);
