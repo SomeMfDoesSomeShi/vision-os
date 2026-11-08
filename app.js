@@ -6,6 +6,7 @@ import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.m
 // ==========================================
 
 const MAX_DISTANCE = 6;
+const ROOM_CAPTURE_DELAY = 2800;
 
 // ==========================================
 // ELEMENTS
@@ -30,13 +31,20 @@ let session = null;
 let referenceSpace = null;
 
 let isRunning = false;
-let usingUnbounded = false;
+let roomCaptureTimer = null;
+let roomCaptureAttempted = false;
+
+let roomCaptureStatus = "Non déclenché";
+let enabledFeatures = [];
+
+let latestPlaneCount = 0;
+let latestMeshCount = 0;
 
 const planeVisuals = new Map();
 const meshVisuals = new Map();
 
 // ==========================================
-// DEPTH SHADER
+// SHADERS DE PROFONDEUR
 // ==========================================
 
 const vertexShader = `
@@ -97,33 +105,30 @@ function createDepthMaterial() {
 }
 
 // ==========================================
-// SUPPORT WEBXR
+// DIAGNOSTIC
 // ==========================================
 
-async function checkSupport() {
-    if (!navigator.xr) {
-        statusElement.textContent = "WebXR indisponible";
-        messageElement.textContent =
-            "Ouvre le site dans Meta Quest Browser.";
-        return;
-    }
+function logCapabilities() {
+    console.group("QUEST DISTANCE SCANNER");
 
-    try {
-        const supported =
-            await navigator.xr.isSessionSupported("immersive-ar");
+    console.log("XR activé :", !!navigator.xr);
+    console.log("Fonction Room Capture :", 
+        typeof session?.initiateRoomCapture === "function"
+    );
 
-        if (!supported) {
-            throw new Error("Mode immersive-ar indisponible.");
-        }
+    console.log("Fonctionnalités activées :", enabledFeatures);
 
-        statusElement.textContent = "WebXR détecté";
-        messageElement.textContent = "Scanner prêt.";
-        startButton.disabled = false;
+    console.log("Repère spatial :", 
+        enabledFeatures.includes("unbounded")
+            ? "unbounded"
+            : "local-floor"
+    );
 
-    } catch (error) {
-        statusElement.textContent = "Non compatible";
-        messageElement.textContent = error.message;
-    }
+    console.log("Mesh Detection demandé :", 
+        enabledFeatures.includes("mesh-detection")
+    );
+
+    console.groupEnd();
 }
 
 // ==========================================
@@ -131,19 +136,19 @@ async function checkSupport() {
 // ==========================================
 
 function createPlaneGeometry(polygon) {
-    const vertices = polygon.map(p =>
-        new THREE.Vector3(p.x, p.y, p.z)
-    );
-
     const positions = [];
 
-    for (const p of vertices) {
-        positions.push(p.x, p.y, p.z);
+    for (const point of polygon) {
+        positions.push(
+            point.x,
+            point.y,
+            point.z
+        );
     }
 
     const indices = [];
 
-    for (let i = 1; i < vertices.length - 1; i++) {
+    for (let i = 1; i < polygon.length - 1; i++) {
         indices.push(0, i, i + 1);
     }
 
@@ -161,14 +166,14 @@ function createPlaneGeometry(polygon) {
     return geometry;
 }
 
-function polygonSignature(polygon) {
-    return polygon.map(p =>
-        `${p.x.toFixed(4)},${p.y.toFixed(4)},${p.z.toFixed(4)}`
+function getPolygonSignature(polygon) {
+    return polygon.map(point =>
+        `${point.x.toFixed(4)},${point.y.toFixed(4)},${point.z.toFixed(4)}`
     ).join(";");
 }
 
 // ==========================================
-// PLANS DÉTECTÉS
+// CRÉATION D'UN PLAN
 // ==========================================
 
 function createPlaneVisual(plane) {
@@ -181,14 +186,19 @@ function createPlaneVisual(plane) {
 
     group.add(mesh);
     group.matrixAutoUpdate = false;
+
     scene.add(group);
 
     return {
         group,
         mesh,
-        signature: polygonSignature(plane.polygon)
+        signature: getPolygonSignature(plane.polygon)
     };
 }
+
+// ==========================================
+// MISE À JOUR D'UN PLAN
+// ==========================================
 
 function updatePlane(plane, frame) {
     if (!plane.polygon || plane.polygon.length < 3) {
@@ -209,10 +219,11 @@ function updatePlane(plane, frame) {
         planeVisuals.set(plane, visual);
     }
 
-    const signature = polygonSignature(plane.polygon);
+    const signature = getPolygonSignature(plane.polygon);
 
     if (signature !== visual.signature) {
         visual.mesh.geometry.dispose();
+
         visual.mesh.geometry =
             createPlaneGeometry(plane.polygon);
 
@@ -230,16 +241,14 @@ function updatePlane(plane, frame) {
 }
 
 // ==========================================
-// MAILLAGES 3D DÉTECTÉS
+// CRÉATION D'UN MAILLAGE 3D
 // ==========================================
 
 function createMeshVisual() {
     const group = new THREE.Group();
 
-    const geometry = new THREE.BufferGeometry();
-
     const mesh = new THREE.Mesh(
-        geometry,
+        new THREE.BufferGeometry(),
         createDepthMaterial()
     );
 
@@ -251,69 +260,65 @@ function createMeshVisual() {
     return {
         group,
         mesh,
-        vertexCount: 0,
-        indexCount: 0
+        lastChangedTime: null
     };
 }
+
+// ==========================================
+// GÉOMÉTRIE DU MAILLAGE
+// ==========================================
 
 function updateMeshGeometry(visual, xrMesh) {
     const vertices = xrMesh.vertices;
     const indices = xrMesh.indices;
 
-    if (!vertices || vertices.length < 9) {
+    if (
+        !vertices ||
+        vertices.length < 9 ||
+        !indices ||
+        indices.length < 3
+    ) {
         return false;
     }
 
-    if (!indices || indices.length < 3) {
-        return false;
+    const changedTime = xrMesh.lastChangedTime;
+
+    // Éviter de reconstruire la géométrie
+    // si le système n'a rien modifié.
+
+    if (
+        changedTime !== undefined &&
+        changedTime === visual.lastChangedTime
+    ) {
+        return true;
     }
 
-    const geometry = visual.mesh.geometry;
+    const geometry = new THREE.BufferGeometry();
 
-    const vertexCount = vertices.length / 3;
+    geometry.setAttribute(
+        "position",
+        new THREE.Float32BufferAttribute(
+            Array.from(vertices),
+            3
+        )
+    );
 
-    // Recréer les attributs uniquement si leur taille change.
-
-    if (visual.vertexCount !== vertexCount) {
-        geometry.setAttribute(
-            "position",
-            new THREE.BufferAttribute(
-                new Float32Array(vertices.length),
-                3
-            )
-        );
-
-        visual.vertexCount = vertexCount;
-    }
-
-    // Actualiser les positions des sommets.
-
-    const position = geometry.getAttribute("position");
-
-    position.array.set(vertices);
-    position.needsUpdate = true;
-
-    // Actualiser les indices si nécessaire.
-
-    if (visual.indexCount !== indices.length) {
-        geometry.setIndex(
-            new THREE.BufferAttribute(
-                new Uint32Array(indices.length),
-                1
-            )
-        );
-
-        visual.indexCount = indices.length;
-    }
-
-    geometry.getIndex().array.set(indices);
-    geometry.getIndex().needsUpdate = true;
+    geometry.setIndex(Array.from(indices));
 
     geometry.computeVertexNormals();
     geometry.computeBoundingSphere();
 
+    visual.mesh.geometry.dispose();
+    visual.mesh.geometry = geometry;
+
+    visual.lastChangedTime = changedTime ?? null;
+
     return true;
 }
+
+// ==========================================
+// MISE À JOUR D'UN MAILLAGE
+// ==========================================
 
 function updateDetectedMesh(xrMesh, frame) {
     if (!xrMesh.meshSpace) return null;
@@ -332,12 +337,9 @@ function updateDetectedMesh(xrMesh, frame) {
         meshVisuals.set(xrMesh, visual);
     }
 
-    const updated = updateMeshGeometry(
-        visual,
-        xrMesh
-    );
-
-    if (!updated) return null;
+    if (!updateMeshGeometry(visual, xrMesh)) {
+        return null;
+    }
 
     visual.group.matrix.fromArray(
         pose.transform.matrix
@@ -358,50 +360,114 @@ function getWorldCenter(visual) {
 
     if (!sphere) return null;
 
-    return sphere.center.clone()
-        .applyMatrix4(visual.group.matrix);
+    return sphere.center.clone().applyMatrix4(
+        visual.group.matrix
+    );
 }
 
 // ==========================================
-// SUPPRESSION DES ÉLÉMENTS
+// ROOM CAPTURE META
 // ==========================================
 
-function removeVisual(map, item) {
-    const visual = map.get(item);
+async function initiateRoomCapture() {
+    if (!session || !isRunning) return;
 
-    if (!visual) return;
+    if (roomCaptureAttempted) return;
 
-    scene.remove(visual.group);
+    roomCaptureAttempted = true;
 
-    visual.mesh.geometry.dispose();
-    visual.mesh.material.dispose();
+    // La documentation Meta recommande
+    // d'appeler cette fonction lorsqu'aucun
+    // plan n'a été détecté après 2 à 3 secondes.
 
-    map.delete(item);
+    if (latestPlaneCount > 0) {
+        roomCaptureStatus =
+            "Non nécessaire : des plans sont déjà détectés.";
+
+        console.info(roomCaptureStatus);
+        return;
+    }
+
+    if (typeof session.initiateRoomCapture !== "function") {
+        roomCaptureStatus =
+            "API initiateRoomCapture indisponible.";
+
+        console.warn(roomCaptureStatus);
+        return;
+    }
+
+    roomCaptureStatus = "Demande de capture envoyée.";
+
+    console.info(
+        "Demande de Room Capture envoyée à Meta Quest."
+    );
+
+    try {
+        const result = session.initiateRoomCapture();
+
+        if (result && typeof result.then === "function") {
+            await result;
+        }
+
+        roomCaptureStatus =
+            "Demande envoyée : termine la configuration de la pièce si elle apparaît.";
+
+        console.info(roomCaptureStatus);
+
+    } catch (error) {
+        roomCaptureStatus =
+            "Erreur Room Capture : " + error.message;
+
+        console.error(
+            "Erreur initiateRoomCapture :",
+            error
+        );
+    }
 }
 
 // ==========================================
-// DÉMARRAGE
+// DÉMARRAGE DU SCANNER
 // ==========================================
 
 async function enterAR() {
     startButton.disabled = true;
 
     messageElement.textContent =
-        "Initialisation de la reconstruction 3D...";
+        "Initialisation du scanner et des capacités spatiales...";
+
+    roomCaptureAttempted = false;
+    roomCaptureStatus = "En attente";
+    latestPlaneCount = 0;
+    latestMeshCount = 0;
 
     try {
         session = await navigator.xr.requestSession(
             "immersive-ar",
             {
-                requiredFeatures: ["local-floor"],
+                requiredFeatures: [
+                    "local-floor",
+                    "plane-detection"
+                ],
 
                 optionalFeatures: [
-                    "plane-detection",
+                    "unbounded",
                     "mesh-detection",
                     "hand-tracking"
                 ]
             }
         );
+
+        enabledFeatures = Array.from(
+            session.enabledFeatures || []
+        );
+
+        // Choisir le repère spatial selon les capacités
+        // réellement activées par le navigateur.
+
+        const referenceType =
+            enabledFeatures.includes("unbounded")
+                ? "unbounded"
+                : "local-floor";
 
         renderer = new THREE.WebGLRenderer({
             alpha: true,
@@ -420,10 +486,9 @@ async function enterAR() {
 
         renderer.xr.enabled = true;
 
-        // Essayer de conserver un repère spatial
-        // qui ne soit pas limité à local-floor.
+        renderer.xr.setReferenceSpaceType(referenceType);
 
-        renderer.xr.setReferenceSpaceType("unbounded");
+        // Fond noir opaque : aucune image réelle de la pièce.
 
         renderer.setClearColor(0x000000, 1);
         renderer.setClearAlpha(1);
@@ -446,50 +511,43 @@ async function enterAR() {
             100
         );
 
-        // Fallback si le navigateur ne prend pas
-        // en charge le repère unbounded.
-
-        try {
-            await renderer.xr.setSession(session);
-            usingUnbounded = true;
-
-        } catch (unboundedError) {
-            console.warn(
-                "Unbounded indisponible, utilisation de local-floor.",
-                unboundedError
-            );
-
-            renderer.xr.setReferenceSpaceType("local-floor");
-
-            await renderer.xr.setSession(session);
-            usingUnbounded = false;
-        }
+        await renderer.xr.setSession(session);
 
         referenceSpace = renderer.xr.getReferenceSpace();
 
         if (!referenceSpace) {
-            throw new Error("Espace de référence indisponible.");
+            throw new Error(
+                "Impossible d'obtenir l'espace spatial."
+            );
         }
 
         document.body.classList.add("xr-active");
 
         isRunning = true;
 
-        const features = session.enabledFeatures
-            ? Array.from(session.enabledFeatures)
-            : [];
-
-        const meshAvailable = features.includes("mesh-detection");
-
         statusElement.textContent = "Scanner actif";
 
-        messageElement.textContent = meshAvailable
-            ? "Reconstruction des maillages et des plans."
-            : "Plans détectés uniquement : mesh-detection indisponible.";
+        roomCaptureStatus =
+            typeof session.initiateRoomCapture === "function"
+                ? "API disponible"
+                : "API indisponible";
+
+        logCapabilities();
+
+        // Laisser le temps aux plans d'arriver.
+        // Si aucun plan n'est détecté, déclencher Room Capture.
+
+        roomCaptureTimer = setTimeout(
+            initiateRoomCapture,
+            ROOM_CAPTURE_DELAY
+        );
 
         session.addEventListener("end", stopAR);
 
         renderer.setAnimationLoop(renderFrame);
+
+        messageElement.textContent =
+            "Scanner actif. Attends la détection de la pièce.";
 
     } catch (error) {
         console.error(error);
@@ -514,7 +572,7 @@ async function enterAR() {
 }
 
 // ==========================================
-// BOUCLE DE RENDU
+// RENDU
 // ==========================================
 
 function renderFrame(time, frame) {
@@ -532,13 +590,26 @@ function renderFrame(time, frame) {
         viewerPose.transform.position.z
     );
 
-    let nearestDistance = Infinity;
-
-    // Plans.
+    // Plans détectés.
 
     const planes = frame.detectedPlanes
         ? Array.from(frame.detectedPlanes)
         : [];
+
+    // Maillages détectés.
+
+    const meshes = frame.detectedMeshes
+        ? Array.from(frame.detectedMeshes)
+        : [];
+
+    latestPlaneCount = planes.length;
+    latestMeshCount = meshes.length;
+
+    let nearestDistance = Infinity;
+
+    // Accumulation des plans.
+    // On ne supprime plus ceux qui disparaissent
+    // temporairement du tableau détecté.
 
     for (const plane of planes) {
         const center = updatePlane(plane, frame);
@@ -551,11 +622,7 @@ function renderFrame(time, frame) {
         }
     }
 
-    // Maillages 3D.
-
-    const meshes = frame.detectedMeshes
-        ? Array.from(frame.detectedMeshes)
-        : [];
+    // Accumulation des maillages.
 
     for (const xrMesh of meshes) {
         const center = updateDetectedMesh(xrMesh, frame);
@@ -568,24 +635,10 @@ function renderFrame(time, frame) {
         }
     }
 
-    // Nettoyage des éléments disparus.
-
-    for (const plane of planeVisuals.keys()) {
-        if (!planes.includes(plane)) {
-            removeVisual(planeVisuals, plane);
-        }
-    }
-
-    for (const mesh of meshVisuals.keys()) {
-        if (!meshes.includes(mesh)) {
-            removeVisual(meshVisuals, mesh);
-        }
-    }
-
     // Tableau de bord.
 
     planeCountElement.textContent =
-        planes.length + meshes.length;
+        planeVisuals.size + meshVisuals.size;
 
     nearestDistanceElement.textContent =
         Number.isFinite(nearestDistance)
@@ -596,11 +649,43 @@ function renderFrame(time, frame) {
 }
 
 // ==========================================
-// ARRÊT
+// ARRÊT ET RAPPORT
 // ==========================================
 
 function stopAR() {
     isRunning = false;
+
+    if (roomCaptureTimer !== null) {
+        clearTimeout(roomCaptureTimer);
+        roomCaptureTimer = null;
+    }
+
+    const finalPlaneCount = planeVisuals.size;
+    const finalMeshCount = meshVisuals.size;
+
+    const report =
+        `Room Capture : ${roomCaptureStatus}\n` +
+        `Plans conservés : ${finalPlaneCount}\n` +
+        `Maillages conservés : ${finalMeshCount}\n` +
+        `Fonctionnalités activées : ${enabledFeatures.join(", ") || "non communiquées"}`;
+
+    console.info("RAPPORT FINAL DU SCAN");
+    console.info(report);
+
+    for (const visual of planeVisuals.values()) {
+        scene.remove(visual.group);
+        visual.mesh.geometry.dispose();
+        visual.mesh.material.dispose();
+    }
+
+    for (const visual of meshVisuals.values()) {
+        scene.remove(visual.group);
+        visual.mesh.geometry.dispose();
+        visual.mesh.material.dispose();
+    }
+
+    planeVisuals.clear();
+    meshVisuals.clear();
 
     if (renderer) {
         renderer.setAnimationLoop(null);
@@ -609,30 +694,22 @@ function stopAR() {
         renderer = null;
     }
 
-    for (const plane of planeVisuals.keys()) {
-        removeVisual(planeVisuals, plane);
+    if (scene) {
+        scene.clear();
     }
 
-    for (const mesh of meshVisuals.keys()) {
-        removeVisual(meshVisuals, mesh);
-    }
-
-    planeVisuals.clear();
-    meshVisuals.clear();
-
-    if (scene) scene.clear();
-
-    session = null;
-    referenceSpace = null;
     scene = null;
     camera = null;
+    session = null;
+    referenceSpace = null;
 
     document.body.classList.remove("xr-active");
 
     startButton.disabled = false;
 
-    statusElement.textContent = "Scanner arrêté";
-    messageElement.textContent = "Tu peux relancer le scanner.";
+    statusElement.textContent = "Scan terminé";
+
+    messageElement.textContent = report;
 
     planeCountElement.textContent = "0";
     nearestDistanceElement.textContent = "—";
@@ -656,6 +733,38 @@ window.addEventListener("resize", () => {
     );
 });
 
+// ==========================================
+// INITIALISATION
+// ==========================================
+
 startButton.addEventListener("click", enterAR);
 
 checkSupport();
+
+async function checkSupport() {
+    if (!navigator.xr) {
+        statusElement.textContent = "WebXR indisponible";
+        messageElement.textContent =
+            "Ouvre le site dans Meta Quest Browser.";
+        return;
+    }
+
+    try {
+        const supported =
+            await navigator.xr.isSessionSupported("immersive-ar");
+
+        if (!supported) {
+            throw new Error("Mode immersive-ar indisponible.");
+        }
+
+        statusElement.textContent = "WebXR détecté";
+        messageElement.textContent =
+            "Scanner prêt.";
+
+        startButton.disabled = false;
+
+    } catch (error) {
+        statusElement.textContent = "Non compatible";
+        messageElement.textContent = error.message;
+    }
+}
