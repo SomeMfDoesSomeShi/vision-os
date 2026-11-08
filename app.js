@@ -9,8 +9,9 @@ const MIN_DISTANCE = 2;
 const MAX_DISTANCE = 12;
 const DEFAULT_DISTANCE = 6;
 
-const ROCK_STABILITY = 100;
+const ROCK_STABILITY = 250;
 const MENU_TOUCH_DISTANCE = 0.055;
+const MENU_INTERACTION_DELAY = 5000;
 
 const $ = id => document.getElementById(id);
 
@@ -46,6 +47,9 @@ let menuOpen = false;
 let rockLostTime = null;
 let activeTouch = null;
 
+let menuInteractionUnlockTime = 0;
+let menuTouchArmed = false;
+
 let latestPlaneCount = 0;
 let latestMeshCount = 0;
 
@@ -56,7 +60,6 @@ const armVisuals = new Map();
 
 let menuGroup = null;
 let menuButtons = [];
-let menuRaycaster = new THREE.Raycaster();
 
 // ==========================================
 // SHADERS DE DISTANCE
@@ -129,9 +132,7 @@ function setSensitivity(value) {
     scene?.traverse(object => {
         const material = object.material;
 
-        if (
-            material?.uniforms?.uMaxDistance
-        ) {
+        if (material?.uniforms?.uMaxDistance) {
             material.uniforms.uMaxDistance.value =
                 maxDistance;
         }
@@ -313,7 +314,6 @@ function createMenuButton(label, subtitle, action, y) {
     );
 
     button.position.set(0, y, 0.012);
-
     button.userData.action = action;
 
     menuGroup.add(button);
@@ -402,7 +402,6 @@ function createMenu() {
         -0.26
     );
 
-    // Curseur de sensibilité
     const sliderBackground = new THREE.Mesh(
         new THREE.PlaneGeometry(0.47, 0.018),
         new THREE.MeshBasicMaterial({
@@ -411,12 +410,7 @@ function createMenu() {
         })
     );
 
-    sliderBackground.position.set(
-        0,
-        0.105,
-        0.025
-    );
-
+    sliderBackground.position.set(0, 0.105, 0.025);
     menuGroup.add(sliderBackground);
 
     const sliderFill = new THREE.Mesh(
@@ -427,16 +421,10 @@ function createMenu() {
         })
     );
 
-    sliderFill.position.set(
-        -0.235,
-        0.105,
-        0.03
-    );
-
+    sliderFill.position.set(-0.235, 0.105, 0.03);
     sliderFill.userData.isSlider = true;
 
     menuGroup.add(sliderFill);
-
     menuGroup.userData.sliderFill = sliderFill;
 
     scene.add(menuGroup);
@@ -478,6 +466,7 @@ function updateMenu() {
 
         if (labels[action]) {
             button.material.map.dispose();
+
             button.material.map = createTextTexture(
                 labels[action],
                 action === "camera"
@@ -490,6 +479,7 @@ function updateMenu() {
 
         if (action === "sensitivity") {
             button.material.map.dispose();
+
             button.material.map = createTextTexture(
                 `SENSIBILITE : ${sensitivityPercent}%`,
                 `Portee actuelle : ${maxDistance.toFixed(1)} metres`
@@ -529,7 +519,10 @@ function updateMenuPosition(frame, viewerPose, rock) {
     );
 
     menuGroup.quaternion.copy(headQuaternion);
+
     menuGroup.visible = true;
+
+    menuGroup.updateMatrixWorld(true);
 }
 
 function closeMenu() {
@@ -539,6 +532,8 @@ function closeMenu() {
 
     menuOpen = false;
     activeTouch = null;
+    menuTouchArmed = false;
+    rockLostTime = null;
 }
 
 // ==========================================
@@ -558,39 +553,43 @@ function getIndexTip(frame, source) {
 function getMenuTouch(frame) {
     if (!menuGroup || !menuGroup.visible) return null;
 
-    const sources = Array.from(session.inputSources)
-        .filter(source =>
+    // Seule la main droite peut interagir avec le menu.
+    const rightHand = Array.from(session.inputSources)
+        .find(source =>
             source.hand &&
-            source.handedness !== "left"
+            source.handedness === "right"
         );
 
+    if (!rightHand) return null;
+
+    const tip = getIndexTip(frame, rightHand);
+
+    if (!tip) return null;
+
+    menuGroup.updateMatrixWorld(true);
+
     const inverse = menuGroup.matrixWorld.clone().invert();
+    const local = tip.clone().applyMatrix4(inverse);
 
-    for (const source of sources) {
-        const tip = getIndexTip(frame, source);
-
-        if (!tip) continue;
-
-        const local = tip.clone().applyMatrix4(inverse);
-
-        if (
-            Math.abs(local.z) > MENU_TOUCH_DISTANCE ||
-            Math.abs(local.x) > 0.29 ||
-            local.y > 0.22 ||
-            local.y < -0.31
-        ) {
-            continue;
-        }
-
-        return {
-            source,
-            local,
-            world: tip
-        };
+    if (
+        Math.abs(local.z) > MENU_TOUCH_DISTANCE ||
+        Math.abs(local.x) > 0.29 ||
+        local.y > 0.22 ||
+        local.y < -0.31
+    ) {
+        return null;
     }
 
-    return null;
+    return {
+        source: rightHand,
+        local,
+        world: tip
+    };
 }
+
+// ==========================================
+// ACTIONS DU MENU
+// ==========================================
 
 function activateMenuAction(action) {
     switch (action) {
@@ -616,7 +615,7 @@ function activateMenuAction(action) {
 
             messageElement.textContent =
                 cameraPassthrough
-                    ? "Passthrough transparent activé."
+                    ? "Transparence du rendu activée."
                     : "Fond opaque activé.";
 
             break;
@@ -634,8 +633,8 @@ function activateMenuAction(action) {
 
         case "distance":
             distanceScanEnabled = !distanceScanEnabled;
-            updateMenu();
 
+            updateMenu();
             updateScanVisibility();
 
             messageElement.textContent =
@@ -647,21 +646,41 @@ function activateMenuAction(action) {
     }
 }
 
-function updateMenuTouch(frame) {
+// ==========================================
+// INTERACTIONS TACTILES AVEC DELAI
+// ==========================================
+
+function updateMenuTouch(frame, time) {
     if (!menuOpen || !menuGroup?.visible) return;
+
+    // Verrouillage de sécurité de 5 secondes.
+    if (time < menuInteractionUnlockTime) {
+        activeTouch = null;
+        menuTouchArmed = false;
+        return;
+    }
 
     const touch = getMenuTouch(frame);
 
+    // L'index doit d'abord quitter le menu.
     if (!touch) {
         activeTouch = null;
+        menuTouchArmed = true;
         return;
     }
+
+    // Ignore tout contact qui a commencé pendant le délai.
+    if (!menuTouchArmed) return;
 
     const x = touch.local.x;
     const y = touch.local.y;
 
-    // Curseur de sensibilité
-    if (y > 0.09 && y < 0.12 && Math.abs(x) < 0.25) {
+    // Curseur de sensibilité.
+    if (
+        y > 0.09 &&
+        y < 0.12 &&
+        Math.abs(x) < 0.25
+    ) {
         const ratio = THREE.MathUtils.clamp(
             (x + 0.235) / 0.47,
             0,
@@ -696,6 +715,7 @@ function updateMenuTouch(frame) {
         return;
     }
 
+    // Une seule activation par contact.
     if (activeTouch !== touched) {
         activeTouch = touched;
         activateMenuAction(touched);
@@ -726,11 +746,23 @@ function updateRockMenu(frame, viewerPose, time) {
 
             menuGroup.visible = true;
 
-            statusElement.textContent = "Menu de contrôle ouvert";
+            // Délai de sécurité de 5 secondes.
+            menuInteractionUnlockTime =
+                time + MENU_INTERACTION_DELAY;
+
+            menuTouchArmed = false;
+            activeTouch = null;
+
+            statusElement.textContent =
+                "Menu de contrôle ouvert";
+
+            messageElement.textContent =
+                "Menu ouvert. Interactions disponibles dans 5 secondes.";
         }
 
         updateMenuPosition(frame, viewerPose, rock);
-        updateMenuTouch(frame);
+
+        updateMenuTouch(frame, time);
 
         return;
     }
@@ -740,12 +772,12 @@ function updateRockMenu(frame, viewerPose, time) {
             rockLostTime = time;
         }
 
-        // Petite tolérance pour éviter les fermetures
-        // causées par une image de tracking manquante.
+        // Tolérance pour éviter les fermetures dues au tracking.
         if (time - rockLostTime > ROCK_STABILITY) {
             closeMenu();
 
             statusElement.textContent = "Scanner actif";
+
             messageElement.textContent =
                 "Menu fermé. Refais le geste Rock avec la main gauche.";
         }
@@ -1012,6 +1044,7 @@ function updateSegment(mesh, start, end) {
     }
 
     mesh.visible = true;
+
     mesh.position.copy(start).add(end).multiplyScalar(0.5);
 
     mesh.quaternion.setFromUnitVectors(
@@ -1029,6 +1062,7 @@ function createJointSphere(radius = 0.018) {
     );
 
     scene.add(mesh);
+
     return mesh;
 }
 
@@ -1120,14 +1154,12 @@ function updateHandArm(source, frame, viewerPosition) {
         return;
     }
 
-    // Estimation des épaules depuis la position du casque.
     const shoulder = viewerPosition.clone();
 
     shoulder.x += key === "left" ? -0.19 : 0.19;
     shoulder.y -= 0.24;
     shoulder.z -= 0.06;
 
-    // Coude estimé entre épaule et poignet.
     const elbow = shoulder.clone().lerp(wrist, 0.53);
 
     elbow.y -= 0.035;
@@ -1291,6 +1323,8 @@ async function enterAR() {
     menuOpen = false;
     rockLostTime = null;
     activeTouch = null;
+    menuInteractionUnlockTime = 0;
+    menuTouchArmed = false;
 
     try {
         session = await navigator.xr.requestSession(
@@ -1356,7 +1390,6 @@ async function enterAR() {
 
         renderer.xr.setReferenceSpaceType(referenceType);
 
-        // Le passthrough est affiché grâce à la transparence.
         renderer.setClearColor(
             0x000000,
             cameraPassthrough ? 0 : 1
