@@ -2,6 +2,13 @@
 import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
 
 // ==========================================
+// CONFIGURATION
+// ==========================================
+
+// Distance à laquelle les surfaces deviennent complètement noires.
+const MAX_DISTANCE_METERS = 6;
+
+// ==========================================
 // ELEMENTS
 // ==========================================
 
@@ -47,184 +54,112 @@ async function checkSupport() {
             await navigator.xr.isSessionSupported("immersive-ar");
 
         if (!supported) {
-            throw new Error("Mode immersive-ar non disponible");
+            throw new Error("Mode immersive-ar indisponible");
         }
 
         statusElement.textContent = "WebXR détecté";
         startButton.disabled = false;
 
         messageElement.textContent =
-            "Le navigateur accepte les sessions de réalité mixte.";
+            "Le scanner est prêt.";
 
     } catch (error) {
 
         statusElement.textContent = "Non compatible";
 
         messageElement.textContent =
-            "La réalité mixte WebXR n'est pas disponible ici.";
+            "La réalité mixte WebXR n'est pas disponible.";
 
     }
 }
 
 // ==========================================
-// DISTANCE COLORS
+// DEPTH SHADER
 // ==========================================
 
-function getDistanceColor(distance) {
+// Ce shader est exécuté pour chaque fragment
+// (pixel couvert par une surface détectée).
 
-    if (distance < 1) {
-        return 0xff5555;
-    }
+const depthMaterial = () => new THREE.ShaderMaterial({
 
-    if (distance < 2.5) {
-        return 0xffd166;
-    }
+    uniforms: {
+        uMaxDistance: {
+            value: MAX_DISTANCE_METERS
+        }
+    },
 
-    return 0x5cf0c0;
-}
+    vertexShader: `
 
-// ==========================================
-// DISTANCE LABEL
-// ==========================================
+        varying vec3 vWorldPosition;
 
-function createLabel() {
+        void main() {
 
-    const canvas = document.createElement("canvas");
+            vec4 worldPosition =
+                modelMatrix * vec4(position, 1.0);
 
-    canvas.width = 512;
-    canvas.height = 128;
+            vWorldPosition = worldPosition.xyz;
 
-    const texture = new THREE.CanvasTexture(canvas);
+            gl_Position =
+                projectionMatrix *
+                viewMatrix *
+                worldPosition;
 
-    const material = new THREE.SpriteMaterial({
-        map: texture,
-        transparent: true,
-        depthTest: false
-    });
+        }
 
-    const sprite = new THREE.Sprite(material);
+    `,
 
-    sprite.scale.set(0.65, 0.16, 1);
+    fragmentShader: `
 
-    drawLabel(sprite, "— m");
+        uniform float uMaxDistance;
 
-    return sprite;
-}
+        varying vec3 vWorldPosition;
 
-function drawLabel(sprite, text) {
+        void main() {
 
-    const canvas = sprite.material.map.image;
-    const ctx = canvas.getContext("2d");
+            // Position de la caméra du casque
+            // jusqu'au point représenté par ce pixel.
 
-    ctx.clearRect(0, 0, 512, 128);
+            float distanceToSurface =
+                distance(cameraPosition, vWorldPosition);
 
-    ctx.fillStyle = "rgba(5,14,25,.88)";
-    ctx.strokeStyle = "#5cf0c0";
-    ctx.lineWidth = 5;
+            // Conversion distance -> luminosité.
 
-    ctx.beginPath();
-    ctx.roundRect(5, 5, 502, 118, 24);
-    ctx.fill();
-    ctx.stroke();
+            float brightness =
+                1.0 - clamp(
+                    distanceToSurface / uMaxDistance,
+                    0.0,
+                    1.0
+                );
 
-    ctx.fillStyle = "#ffffff";
-    ctx.font = "bold 54px Arial";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
+            // Blanc = proche
+            // Noir = éloigné
 
-    ctx.fillText(text, 256, 65);
+            gl_FragColor = vec4(
+                vec3(brightness),
+                1.0
+            );
 
-    sprite.material.map.needsUpdate = true;
-}
+        }
+
+    `,
+
+    side: THREE.DoubleSide,
+
+    transparent: false,
+    depthTest: true,
+    depthWrite: true,
+
+    toneMapped: false
+
+});
 
 // ==========================================
 // CREATE SURFACE
 // ==========================================
 
-function createPlaneVisual() {
+function createPlaneVisual(plane) {
 
     const group = new THREE.Group();
-
-    const meshMaterial = new THREE.MeshBasicMaterial({
-
-        color: 0x5cf0c0,
-        transparent: true,
-        opacity: 0.15,
-        side: THREE.DoubleSide,
-        depthWrite: false
-
-    });
-
-    const lineMaterial = new THREE.LineBasicMaterial({
-
-        color: 0x5cf0c0,
-        transparent: true,
-        opacity: 0.95
-
-    });
-
-    const mesh = new THREE.Mesh(
-        new THREE.BufferGeometry(),
-        meshMaterial
-    );
-
-    const line = new THREE.LineLoop(
-        new THREE.BufferGeometry(),
-        lineMaterial
-    );
-
-    const label = createLabel();
-
-    group.add(mesh);
-    group.add(line);
-    group.add(label);
-
-    scene.add(group);
-
-    return {
-        group,
-        mesh,
-        line,
-        label
-    };
-}
-
-// ==========================================
-// UPDATE SURFACE
-// ==========================================
-
-function updatePlane(plane, frame, viewerPosition) {
-
-    let visual = planeVisuals.get(plane);
-
-    if (!visual) {
-
-        visual = createPlaneVisual();
-        planeVisuals.set(plane, visual);
-
-    }
-
-    const pose = frame.getPose(
-        plane.planeSpace,
-        referenceSpace
-    );
-
-    if (
-        !pose ||
-        !plane.polygon ||
-        plane.polygon.length < 3
-    ) {
-
-        visual.group.visible = false;
-        return null;
-
-    }
-
-    const matrix = new THREE.Matrix4().fromArray(
-        pose.transform.matrix
-    );
-
-    // Polygon points in plane-local coordinates
 
     const points = plane.polygon.map(point => {
 
@@ -235,10 +170,6 @@ function updatePlane(plane, frame, viewerPosition) {
         );
 
     });
-
-    // ======================================
-    // CREATE MESH
-    // ======================================
 
     const positions = [];
 
@@ -251,6 +182,8 @@ function updatePlane(plane, frame, viewerPosition) {
         );
 
     }
+
+    // Triangulation simple du polygone.
 
     const indices = [];
 
@@ -268,87 +201,99 @@ function updatePlane(plane, frame, viewerPosition) {
     );
 
     geometry.setIndex(indices);
+
     geometry.computeVertexNormals();
 
-    visual.mesh.geometry.dispose();
-    visual.mesh.geometry = geometry;
+    // Matériau qui calcule la profondeur par pixel.
 
-    // ======================================
-    // CREATE OUTLINE
-    // ======================================
+    const material = depthMaterial();
 
-    const linePoints = [...points, points[0]];
+    const mesh = new THREE.Mesh(
+        geometry,
+        material
+    );
 
-    const lineGeometry = new THREE.BufferGeometry()
-        .setFromPoints(linePoints);
+    group.add(mesh);
 
-    visual.line.geometry.dispose();
-    visual.line.geometry = lineGeometry;
+    group.matrixAutoUpdate = false;
 
-    // ======================================
-    // APPLY SPATIAL TRANSFORM
-    // ======================================
+    scene.add(group);
 
-    visual.group.matrixAutoUpdate = false;
+    return {
+        group,
+        mesh
+    };
+
+}
+
+// ==========================================
+// UPDATE SURFACE
+// ==========================================
+
+function updatePlane(plane, frame, viewerPosition) {
+
+    if (!plane.polygon || plane.polygon.length < 3) {
+        return null;
+    }
+
+    let visual = planeVisuals.get(plane);
+
+    if (!visual) {
+
+        visual = createPlaneVisual(plane);
+
+        planeVisuals.set(plane, visual);
+
+    }
+
+    const pose = frame.getPose(
+        plane.planeSpace,
+        referenceSpace
+    );
+
+    if (!pose) {
+
+        visual.group.visible = false;
+        return null;
+
+    }
+
+    // Position réelle de la surface dans la pièce.
+
+    const matrix = new THREE.Matrix4().fromArray(
+        pose.transform.matrix
+    );
+
     visual.group.matrix.copy(matrix);
+
     visual.group.matrixWorldNeedsUpdate = true;
 
     visual.group.visible = true;
 
-    // ======================================
-    // CALCULATE CENTER
-    // ======================================
+    // Centre de la surface pour le tableau de bord.
 
-    const localCenter = points.reduce(
-        (sum, point) => sum.add(point),
-        new THREE.Vector3()
-    ).multiplyScalar(1 / points.length);
+    const center = new THREE.Vector3();
 
-    const center = localCenter.clone().applyMatrix4(matrix);
+    for (const point of plane.polygon) {
 
-    // ======================================
-    // CALCULATE PLANE NORMAL
-    // ======================================
+        center.add(
+            new THREE.Vector3(
+                point.x,
+                point.y,
+                point.z
+            )
+        );
 
-    const normal = new THREE.Vector3(0, 1, 0)
-        .transformDirection(matrix)
-        .normalize();
+    }
 
-    // ======================================
-    // CALCULATE DISTANCE
-    // ======================================
+    center.multiplyScalar(1 / plane.polygon.length);
 
-    const distance = Math.abs(
-        viewerPosition.clone()
-            .sub(center)
-            .dot(normal)
-    );
+    center.applyMatrix4(matrix);
 
-    // ======================================
-    // UPDATE LABEL
-    // ======================================
+    // Distance du casque au centre de cette surface.
 
-    visual.label.position.copy(localCenter);
+    return viewerPosition.distanceTo(center);
 
-    visual.label.position.add(
-        new THREE.Vector3(0, 0.03, 0)
-    );
-
-    drawLabel(
-        visual.label,
-        distance.toFixed(2) + " m"
-    );
-
-    // ======================================
-    // UPDATE COLORS
-    // ======================================
-
-    const color = getDistanceColor(distance);
-
-    visual.mesh.material.color.setHex(color);
-    visual.line.material.color.setHex(color);
-
-    return distance;
 }
 
 // ==========================================
@@ -360,7 +305,7 @@ async function enterAR() {
     startButton.disabled = true;
 
     messageElement.textContent =
-        "Demande d'accès aux fonctionnalités spatiales...";
+        "Initialisation du scanner de profondeur...";
 
     try {
 
@@ -400,13 +345,21 @@ async function enterAR() {
 
         renderer.xr.setReferenceSpaceType("local-floor");
 
+        // Laisse passer l'image réelle du casque
+        // dans les zones sans surface détectée.
+
         renderer.setClearColor(0x000000, 0);
 
         document.body.appendChild(renderer.domElement);
 
         scene = new THREE.Scene();
 
-        camera = new THREE.PerspectiveCamera();
+        camera = new THREE.PerspectiveCamera(
+            70,
+            window.innerWidth / window.innerHeight,
+            0.01,
+            100
+        );
 
         await renderer.xr.setSession(session);
 
@@ -425,6 +378,9 @@ async function enterAR() {
         isRunning = true;
 
         statusElement.textContent = "Scanner actif";
+
+        messageElement.textContent =
+            "Calcul de profondeur en temps réel.";
 
         session.addEventListener("end", stopAR);
 
@@ -476,13 +432,7 @@ function stopAR() {
         for (const visual of planeVisuals.values()) {
 
             visual.mesh.geometry.dispose();
-            visual.line.geometry.dispose();
-
             visual.mesh.material.dispose();
-            visual.line.material.dispose();
-
-            visual.label.material.map.dispose();
-            visual.label.material.dispose();
 
         }
 
@@ -536,7 +486,7 @@ function renderFrame(time, frame) {
 
     );
 
-    // Read detected planes
+    // Récupération des surfaces détectées.
 
     const planes = frame.detectedPlanes
         ? Array.from(frame.detectedPlanes)
@@ -563,7 +513,7 @@ function renderFrame(time, frame) {
 
     }
 
-    // Remove planes no longer detected
+    // Supprimer les surfaces qui ne sont plus détectées.
 
     for (const [plane, visual] of planeVisuals) {
 
@@ -572,13 +522,7 @@ function renderFrame(time, frame) {
             scene.remove(visual.group);
 
             visual.mesh.geometry.dispose();
-            visual.line.geometry.dispose();
-
             visual.mesh.material.dispose();
-            visual.line.material.dispose();
-
-            visual.label.material.map.dispose();
-            visual.label.material.dispose();
 
             planeVisuals.delete(plane);
 
@@ -586,7 +530,7 @@ function renderFrame(time, frame) {
 
     }
 
-    // Update dashboard
+    // Tableau de bord.
 
     planeCountElement.textContent = planes.length;
 
@@ -608,6 +552,11 @@ startButton.addEventListener("click", enterAR);
 window.addEventListener("resize", () => {
 
     if (!renderer || !camera) return;
+
+    camera.aspect =
+        window.innerWidth / window.innerHeight;
+
+    camera.updateProjectionMatrix();
 
     renderer.setSize(
         window.innerWidth,
