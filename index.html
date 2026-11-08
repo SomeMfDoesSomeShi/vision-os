@@ -1,753 +1,103 @@
-
 <!DOCTYPE html>
 <html lang="fr">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SONAR VISION VR</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#080d18">
 
-<style>
-* {
-    box-sizing: border-box;
-}
+    <title>Quest Distance Scanner</title>
 
-body {
-    margin: 0;
-    background: black;
-    color: white;
-    font-family: Arial, sans-serif;
-    overflow: hidden;
-}
-
-#scene {
-    position: fixed;
-    inset: 0;
-}
-
-#panel {
-    position: fixed;
-    z-index: 2;
-    left: 50%;
-    top: 50%;
-    transform: translate(-50%, -50%);
-    width: min(92vw, 430px);
-    padding: 24px;
-    border: 1px solid #333;
-    border-radius: 18px;
-    background: #0b0b0f;
-    text-align: center;
-}
-
-h1 {
-    font-size: 22px;
-    letter-spacing: 4px;
-    font-weight: 500;
-}
-
-p {
-    color: #aaa;
-    line-height: 1.5;
-    font-size: 14px;
-}
-
-button {
-    padding: 13px 16px;
-    margin: 5px;
-    border: 1px solid #555;
-    border-radius: 9px;
-    background: #19191f;
-    color: white;
-    font-size: 14px;
-    cursor: pointer;
-}
-
-#start {
-    background: #eee;
-    color: #080808;
-}
-
-button:disabled {
-    opacity: 0.4;
-}
-
-#status {
-    font-size: 12px;
-    color: #aaa;
-    min-height: 20px;
-    margin-top: 12px;
-}
-
-#meter {
-    height: 3px;
-    background: #222;
-    margin-top: 12px;
-}
-
-#level {
-    height: 100%;
-    width: 0;
-    background: white;
-}
-
-small {
-    color: #777;
-}
-
-body.in-vr #panel {
-    display: none;
-}
-</style>
+    <link rel="stylesheet" href="style.css">
 </head>
 
 <body>
 
-<div id="scene"></div>
+    <main class="app" id="app">
 
-<div id="panel">
+        <header>
+            <div class="brand">
+                <span class="dot"></span>
+                QUEST <strong>DISTANCE SCANNER</strong>
+            </div>
 
-    <h1>SONAR VISION</h1>
+            <span class="status" id="status">
+                Initialisation...
+            </span>
+        </header>
 
-    <p>
-        Le son devient lumière.<br>
-        Noir total, taches lumineuses en 3D autour de toi.
-    </p>
+        <section class="hero">
 
-    <button id="start">ACTIVER LE MICRO</button>
-    <button id="vr" disabled>ENTRER EN VR</button>
-    <button id="test">TEST VISUEL</button>
-    <button id="stop" disabled>ARRÊTER</button>
+            <p class="eyebrow">SPATIAL AWARENESS · WEBXR</p>
 
-    <div id="status">En attente du microphone.</div>
+            <h1>
+                Visualise les distances
+                <span>autour de toi.</span>
+            </h1>
 
-    <div id="meter">
-        <div id="level"></div>
-    </div>
+            <p class="intro">
+                Analyse les surfaces de ton environnement et
+                visualise leurs distances directement dans
+                ton espace en réalité mixte.
+            </p>
 
-    <small>HTTPS requis · Autorise le microphone</small>
+            <button id="startButton" disabled>
+                Entrer en réalité mixte
+                <span>↗</span>
+            </button>
 
-</div>
+            <p id="message" class="message">
+                Vérification de la compatibilité WebXR...
+            </p>
 
-<script type="module">
+        </section>
 
-import * as THREE from
-'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+        <section class="dashboard">
 
-const $ = id => document.getElementById(id);
+            <div class="panel">
 
-let renderer;
-let scene;
-let camera;
+                <div class="panel-title">
+                    SURFACES DÉTECTÉES
+                </div>
 
-let ctx;
-let stream;
-let source;
-let splitter;
+                <div class="metric">
+                    <strong id="planeCount">0</strong>
+                    <span>plans</span>
+                </div>
 
-let aL;
-let aR;
-let aM;
+                <p>
+                    Nombre de surfaces spatiales détectées.
+                </p>
 
-let dL;
-let dR;
-let dM;
+            </div>
 
-let channels = 1;
-let ready = false;
-let session = null;
-let last = 0;
-let testUntil = 0;
+            <div class="panel">
 
-const N = 20;
-const sprites = [];
+                <div class="panel-title">
+                    DISTANCE LA PLUS COURTE
+                </div>
 
-// --------------------------------
-// SCÈNE 3D
-// --------------------------------
+                <div class="metric">
+                    <strong id="nearestDistance">—</strong>
+                    <span>mètres</span>
+                </div>
 
-scene = new THREE.Scene();
-scene.background = new THREE.Color(0x000000);
+                <p>
+                    Distance perpendiculaire estimée jusqu'à
+                    la surface détectée la plus proche.
+                </p>
 
-camera = new THREE.PerspectiveCamera(
-    70,
-    innerWidth / innerHeight,
-    0.05,
-    50
-);
+            </div>
 
-renderer = new THREE.WebGLRenderer({
-    antialias: true
-});
+        </section>
 
-renderer.setPixelRatio(
-    Math.min(devicePixelRatio, 1.5)
-);
+        <footer>
+            <span>QUEST DISTANCE SCANNER</span>
+            <span>WEBXR · THREE.JS</span>
+        </footer>
 
-renderer.setSize(innerWidth, innerHeight);
-renderer.xr.enabled = true;
+    </main>
 
-$('scene').appendChild(renderer.domElement);
+    <script type="module" src="app.js"></script>
 
-// Groupe contenant les taches lumineuses
-const group = new THREE.Group();
-scene.add(group);
-
-// --------------------------------
-// TEXTURE LUMINEUSE
-// --------------------------------
-
-function createGlow() {
-
-    const canvas = document.createElement('canvas');
-
-    canvas.width = 128;
-    canvas.height = 128;
-
-    const x = canvas.getContext('2d');
-
-    const gradient = x.createRadialGradient(
-        64, 64, 1,
-        64, 64, 63
-    );
-
-    gradient.addColorStop(0, '#ffffff');
-    gradient.addColorStop(0.12, 'rgba(255,255,255,0.9)');
-    gradient.addColorStop(0.36, 'rgba(255,255,255,0.3)');
-    gradient.addColorStop(1, 'rgba(255,255,255,0)');
-
-    x.fillStyle = gradient;
-    x.fillRect(0, 0, 128, 128);
-
-    return new THREE.CanvasTexture(canvas);
-}
-
-const glowTexture = createGlow();
-
-// --------------------------------
-// CRÉATION DES TACHES
-// --------------------------------
-
-for (let i = 0; i < N; i++) {
-
-    const material = new THREE.SpriteMaterial({
-
-        map: glowTexture,
-
-        color: 0xffffff,
-
-        transparent: true,
-
-        opacity: 0,
-
-        blending: THREE.AdditiveBlending,
-
-        depthWrite: false
-
-    });
-
-    const sprite = new THREE.Sprite(material);
-
-    sprite.position.set(0, 0, -2.8);
-
-    sprite.scale.set(0.1, 0.1, 1);
-
-    sprite.userData.level = 0;
-
-    group.add(sprite);
-
-    sprites.push(sprite);
-}
-
-// --------------------------------
-// ANALYSE DES FRÉQUENCES
-// --------------------------------
-
-function frequency(i) {
-
-    return 65 * Math.pow(
-        9000 / 65,
-        i / (N - 1)
-    );
-
-}
-
-function frequencyBin(f, analyser) {
-
-    return Math.max(
-        0,
-        Math.min(
-            analyser.frequencyBinCount - 1,
-            Math.round(
-                f / (ctx.sampleRate / 2) *
-                analyser.frequencyBinCount
-            )
-        )
-    );
-
-}
-
-function getBandEnergy(data, analyser, i) {
-
-    const low = frequencyBin(
-        frequency(Math.max(0, i - 0.5)),
-        analyser
-    );
-
-    const high = Math.max(
-        low + 1,
-        frequencyBin(
-            frequency(Math.min(N - 1, i + 0.5)),
-            analyser
-        )
-    );
-
-    let sum = 0;
-    let count = 0;
-
-    for (let k = low; k <= high && k < data.length; k++) {
-
-        const db =
-            analyser.minDecibels +
-            (data[k] / 255) *
-            (analyser.maxDecibels - analyser.minDecibels);
-
-        sum += db;
-        count++;
-
-    }
-
-    return sum / Math.max(1, count);
-
-}
-
-// --------------------------------
-// COULEUR DES SONS
-// --------------------------------
-
-function frequencyColor(i) {
-
-    const t = i / (N - 1);
-
-    // Grave : bleu
-    // Aigu : rouge
-
-    const hue = 220 * (1 - t);
-
-    return new THREE.Color().setHSL(
-        hue / 360,
-        1,
-        0.56
-    );
-
-}
-
-// --------------------------------
-// TEST VISUEL
-// --------------------------------
-
-function visualTest() {
-
-    testUntil = performance.now() + 20000;
-
-    if (!ready) {
-
-        $('status').textContent =
-            'Test visuel actif : observe les taches dans la scène.';
-
-    }
-
-}
-
-// --------------------------------
-// MISE À JOUR DES TACHES
-// --------------------------------
-
-function update() {
-
-    // Mode test sans microphone
-    if (!ready && performance.now() < testUntil) {
-
-        const time = performance.now() / 1000;
-
-        for (let i = 0; i < N; i++) {
-
-            const sprite = sprites[i];
-
-            const value =
-                0.38 + 0.25 * Math.sin(time * 3 + i * 0.8);
-
-            sprite.material.color.copy(
-                frequencyColor(i)
-            );
-
-            sprite.material.opacity = value;
-
-            const size = 0.18 + value * 0.35;
-
-            sprite.scale.set(size, size, 1);
-
-            const angle =
-                Math.sin(time * 0.7 + i * 0.41) * 0.8;
-
-            sprite.position.set(
-                Math.sin(angle) * 2.5,
-                (i / (N - 1) - 0.5) * 1.3,
-                -Math.cos(angle) * 2.5
-            );
-
-        }
-
-        return;
-    }
-
-    if (!ready) {
-
-        $('level').style.width = '0%';
-
-        for (const sprite of sprites) {
-            sprite.material.opacity = 0;
-        }
-
-        return;
-    }
-
-    // Récupération des données audio
-    if (channels >= 2) {
-
-        aL.getByteFrequencyData(dL);
-        aR.getByteFrequencyData(dR);
-
-    } else {
-
-        aM.getByteFrequencyData(dM);
-
-    }
-
-    let total = 0;
-
-    for (let i = 0; i < N; i++) {
-
-        let left;
-        let right;
-        let energy;
-        let pan = 0;
-
-        if (channels >= 2) {
-
-            left = getBandEnergy(dL, aL, i);
-            right = getBandEnergy(dR, aR, i);
-
-            energy = Math.max(left, right);
-
-            // Estimation gauche / droite
-            pan =
-                (right - left) /
-                (Math.abs(right) + Math.abs(left) + 1);
-
-        } else {
-
-            energy = getBandEnergy(dM, aM, i);
-
-        }
-
-        total += Math.max(0, energy + 100);
-
-        // Intensité lumineuse
-        let value = Math.max(
-            0,
-            Math.min(1, (energy + 88) / 58)
-        );
-
-        value = Math.max(
-            0,
-            (value - 0.025) / 0.975
-        );
-
-        const sprite = sprites[i];
-
-        // Lissage pour éviter les clignotements
-        sprite.userData.level +=
-            (value * value - sprite.userData.level) * 0.24;
-
-        const intensity = sprite.userData.level;
-
-        // Couleur suivant la fréquence
-        sprite.material.color.copy(
-            frequencyColor(i)
-        );
-
-        // Luminosité
-        sprite.material.opacity = Math.min(
-            0.98,
-            intensity * 1.5
-        );
-
-        // Taille suivant le volume
-        const size = 0.035 + intensity * 0.75;
-
-        sprite.scale.set(size, size, 1);
-
-        // Direction estimée à partir de la stéréo
-        const angle = pan * 1.18;
-
-        const distance = 2.2 + (1 - intensity) * 0.6;
-
-        const vertical =
-            (i / (N - 1) - 0.5) * 1.2;
-
-        sprite.position.set(
-            Math.sin(angle) * distance,
-            vertical,
-            -Math.cos(angle) * distance
-        );
-
-    }
-
-    $('level').style.width =
-        Math.min(100, total / (N * 60) * 100) + '%';
-
-}
-
-// --------------------------------
-// BOUCLE DE RENDU
-// --------------------------------
-
-function render(time) {
-
-    if (time - last > 25) {
-
-        update();
-
-        last = time;
-
-    }
-
-    renderer.render(scene, camera);
-
-}
-
-renderer.setAnimationLoop(render);
-
-// --------------------------------
-// ACTIVATION DU MICROPHONE
-// --------------------------------
-
-$('start').onclick = async () => {
-
-    try {
-
-        if (!navigator.mediaDevices?.getUserMedia) {
-
-            throw new Error(
-                'Microphone indisponible. Ouvre le site en HTTPS.'
-            );
-
-        }
-
-        $('status').textContent =
-            'Demande de permission microphone...';
-
-        stream = await navigator.mediaDevices.getUserMedia({
-
-            audio: {
-
-                channelCount: { ideal: 2 },
-
-                echoCancellation: false,
-
-                noiseSuppression: false,
-
-                autoGainControl: false
-
-            }
-
-        });
-
-        ctx = new AudioContext();
-
-        await ctx.resume();
-
-        source = ctx.createMediaStreamSource(stream);
-
-        channels = Math.min(
-            2,
-            stream.getAudioTracks()[0]
-                .getSettings().channelCount || 1
-        );
-
-        // --------------------------------
-        // STÉRÉO
-        // --------------------------------
-
-        if (channels >= 2) {
-
-            splitter = ctx.createChannelSplitter(2);
-
-            aL = ctx.createAnalyser();
-            aR = ctx.createAnalyser();
-
-            aL.fftSize = 4096;
-            aR.fftSize = 4096;
-
-            aL.smoothingTimeConstant = 0.45;
-            aR.smoothingTimeConstant = 0.45;
-
-            aL.minDecibels = -100;
-            aR.minDecibels = -100;
-
-            aL.maxDecibels = -20;
-            aR.maxDecibels = -20;
-
-            source.connect(splitter);
-
-            splitter.connect(aL, 0);
-            splitter.connect(aR, 1);
-
-            dL = new Uint8Array(
-                aL.frequencyBinCount
-            );
-
-            dR = new Uint8Array(
-                aR.frequencyBinCount
-            );
-
-        }
-
-        // --------------------------------
-        // MONO
-        // --------------------------------
-
-        else {
-
-            aM = ctx.createAnalyser();
-
-            aM.fftSize = 4096;
-
-            aM.smoothingTimeConstant = 0.45;
-
-            aM.minDecibels = -100;
-            aM.maxDecibels = -20;
-
-            source.connect(aM);
-
-            dM = new Uint8Array(
-                aM.frequencyBinCount
-            );
-
-        }
-
-        ready = true;
-
-        $('start').disabled = true;
-        $('stop').disabled = false;
-
-        $('vr').disabled = !(
-            navigator.xr &&
-            await navigator.xr.isSessionSupported('immersive-vr')
-        );
-
-        $('status').textContent =
-            channels >= 2
-            ? 'Stéréo détectée : estimation gauche/droite active.'
-            : 'Mono détecté : taches centrées, sans direction.';
-
-    }
-
-    catch (error) {
-
-        $('status').textContent =
-            error.message || 'Erreur microphone';
-
-        console.error(error);
-
-    }
-
-};
-
-// --------------------------------
-// ARRÊT DU MICROPHONE
-// --------------------------------
-
-$('stop').onclick = () => {
-
-    ready = false;
-
-    if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-    }
-
-    if (ctx) {
-        ctx.close();
-    }
-
-    ctx = null;
-    stream = null;
-
-    $('start').disabled = false;
-    $('stop').disabled = true;
-    $('vr').disabled = true;
-
-    $('status').textContent = 'Micro arrêté.';
-
-};
-
-// --------------------------------
-// ENTRER EN VR
-// --------------------------------
-
-$('vr').onclick = async () => {
-
-    try {
-
-        session = await navigator.xr.requestSession(
-            'immersive-vr',
-            {
-                optionalFeatures: ['local-floor']
-            }
-        );
-
-        await renderer.xr.setSession(session);
-
-        document.body.classList.add('in-vr');
-
-        session.addEventListener('end', () => {
-
-            document.body.classList.remove('in-vr');
-
-            session = null;
-
-        });
-
-    }
-
-    catch (error) {
-
-        $('status').textContent =
-            error.message || 'Impossible de démarrer la VR';
-
-    }
-
-};
-
-// --------------------------------
-// BOUTONS
-// --------------------------------
-
-$('test').onclick = visualTest;
-
-// --------------------------------
-// REDIMENSIONNEMENT
-// --------------------------------
-
-addEventListener('resize', () => {
-
-    camera.aspect = innerWidth / innerHeight;
-
-    camera.updateProjectionMatrix();
-
-    renderer.setSize(innerWidth, innerHeight);
-
-});
-
-</script>
 </body>
 </html>
