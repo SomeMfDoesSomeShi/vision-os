@@ -1,311 +1,47 @@
-
-<!DOCTYPE html>
-<html lang="fr">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>VISION OS - Sound Vision</title>
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>SONAR VISION VR</title>
 <style>
-*{box-sizing:border-box}
-body{
- margin:0;background:#050c14;color:#e4faff;
- font-family:Arial,sans-serif
-}
-header{padding:22px;color:#55dcff;
- font-size:25px;font-weight:bold;letter-spacing:5px}
-main{max-width:850px;margin:auto;padding:15px}
-.panel{
- background:#102333;border:1px solid #28536b;
- border-radius:16px;padding:18px;margin-bottom:15px
-}
-h3{color:#64dcff;font-size:14px;letter-spacing:2px}
-button{
- background:#075574;color:white;border:1px solid #39caff;
- border-radius:9px;padding:13px 18px;margin:5px;
- cursor:pointer
-}
-button:disabled{opacity:.5}
-canvas{width:100%;display:block;border-radius:10px}
-input{accent-color:#40dfff;width:100%}
-.status{font-size:12px;color:#8db4c8}
-#intensity{
- height:14px;background:#06121b;border-radius:20px;
- overflow:hidden;margin-top:12px
-}
-#level{
- height:100%;width:0%;
- background:linear-gradient(90deg,#087cff,#00eaff,#ff2929);
- transition:width .05s
-}
-</style>
-</head>
-<body>
-<header>VISION OS</header>
-<main>
-<section class="panel">
-<h3>SOUND VISION</h3>
-<canvas id="visual" width="1200" height="650"></canvas>
-<h3>SOUND INTENSITY</h3>
-<div id="intensity"><div id="level"></div></div>
-<p id="db" class="status">Waiting for microphone...</p>
-</section>
-
-<section class="panel">
-<h3>CONTROLS</h3>
-<button id="start">ACTIVATE MICROPHONE</button>
-<button id="stop">STOP</button>
-<button id="vr">ENTER VR</button>
-<p id="status" class="status">Microphone disabled.</p>
-
-<h3>SENSITIVITY</h3>
-<input id="sensitivity" type="range"
- min="0.5" max="4" step="0.1" value="2">
-<p class="status">Adjusts visual brightness.</p>
-</section>
-</main>
-
+*{box-sizing:border-box}body{margin:0;background:#000;color:#eee;font-family:Arial;overflow:hidden}#scene{position:fixed;inset:0}
+#panel{position:fixed;z-index:2;left:50%;top:50%;transform:translate(-50%,-50%);width:min(92vw,430px);padding:24px;border:1px solid #333;border-radius:18px;background:#0b0b0fee;text-align:center}
+h1{font-size:22px;letter-spacing:4px;font-weight:500}p{color:#aaa;line-height:1.5;font-size:14px}
+button{padding:13px 16px;margin:5px;border:1px solid #555;border-radius:9px;background:#19191f;color:white;font-size:14px}
+#start{background:#eee;color:#080808}button:disabled{opacity:.4}#status{font-size:12px;color:#aaa;min-height:20px;margin-top:12px}
+#meter{height:3px;background:#222;margin-top:12px}#level{height:100%;width:0;background:#eee}small{color:#777}body.in-vr #panel{display:none}
+</style></head><body><div id="scene"></div>
+<div id="panel"><h1>SONAR VISION</h1><p>Le son devient lumière. Noir total, taches lumineuses en 3D autour de toi.</p>
+<button id="start">ACTIVER LE MICRO</button><button id="vr" disabled>ENTRER EN VR</button><button id="stop" disabled>ARRÊTER</button>
+<div id="status">En attente du microphone.</div><div id="meter"><div id="level"></div></div><small>HTTPS requis · Autorise le microphone</small></div>
 <script type="module">
-import * as THREE from
-'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
-
-const canvas=document.getElementById('visual');
-const ctx=canvas.getContext('2d');
-
-let audio=null;
-let analyser=null;
-let stream=null;
-let frequencies=null;
-let waveform=null;
-let active=false;
-let sensitivity=2;
-let smoothedLevel=0;
-
-const status=document.getElementById('status');
-const levelBar=document.getElementById('level');
-const dbText=document.getElementById('db');
-
-document.getElementById('sensitivity').oninput=e=>{
- sensitivity=Number(e.target.value);
-};
-
-async function startAudio(){
- try{
-  stream=await navigator.mediaDevices.getUserMedia({
-   audio:{
-    echoCancellation:false,
-    noiseSuppression:false,
-    autoGainControl:false
-   }
-  });
-
-  audio=new AudioContext();
-  await audio.resume();
-
-  analyser=audio.createAnalyser();
-  analyser.fftSize=4096;
-  analyser.smoothingTimeConstant=0.65;
-
-  const input=audio.createMediaStreamSource(stream);
-  input.connect(analyser);
-
-  frequencies=new Uint8Array(analyser.frequencyBinCount);
-  waveform=new Uint8Array(analyser.fftSize);
-
-  active=true;
-  status.textContent='Microphone active.';
- }catch(error){
-  status.textContent='Microphone error: '+error.message;
- }
-}
-
-function stopAudio(){
- active=false;
-
- if(stream){
-  stream.getTracks().forEach(t=>t.stop());
-  stream=null;
- }
-
- if(audio){
-  audio.close();
-  audio=null;
- }
-
- analyser=null;
- status.textContent='Microphone disabled.';
-}
-
-document.getElementById('start').onclick=startAudio;
-document.getElementById('stop').onclick=stopAudio;
-
-function draw(){
- const w=canvas.width;
- const h=canvas.height;
-
- ctx.fillStyle='#02080e';
- ctx.fillRect(0,0,w,h);
-
- if(!active || !analyser){
-  ctx.fillStyle='#65dfff';
-  ctx.font='32px Arial';
-  ctx.fillText('WAITING FOR AUDIO',390,320);
-  requestAnimationFrame(draw);
-  return;
- }
-
- analyser.getByteFrequencyData(frequencies);
- analyser.getByteTimeDomainData(waveform);
-
- // Overall audio intensity from RMS
- let sum=0;
- for(let i=0;i<waveform.length;i++){
-  const v=(waveform[i]-128)/128;
-  sum+=v*v;
- }
- const rms=Math.sqrt(sum/waveform.length);
- const intensity=Math.min(1,rms*5);
-
- smoothedLevel+=(intensity-smoothedLevel)*0.2;
-
- levelBar.style.width=(smoothedLevel*100)+'%';
- dbText.textContent='Relative sound intensity: '+
-  Math.round(smoothedLevel*100)+'%';
-
- // Frequency visualization
- const columns=120;
- const colWidth=w/columns;
-
- for(let x=0;x<columns;x++){
-  // Logarithmic frequency distribution
-  const t=x/(columns-1);
-  const start=Math.floor(Math.pow(t,2)*frequencies.length);
-  const end=Math.max(start+1,
-   Math.floor(Math.pow((x+1)/columns,2)*frequencies.length));
-
-  let sum=0;
-  for(let i=start;i<end;i++)sum+=frequencies[i];
-
-  const amplitude=(sum/(end-start))/255;
-  const brightness=Math.min(100,
-   4+amplitude*85*sensitivity);
-
-  // Low frequencies blue, high frequencies red
-  const hue=220-t*220;
-
-  ctx.fillStyle=`hsl(${hue},100%,${brightness}%)`;
-
-  const barHeight=amplitude*h*.9;
-  const y=(h-barHeight)/2;
-
-  ctx.fillRect(x*colWidth,y,colWidth-2,barHeight);
- }
-
- // Central frequency reference
- ctx.strokeStyle='#ffffff22';
- ctx.lineWidth=2;
- ctx.beginPath();
- ctx.moveTo(0,h/2);
- ctx.lineTo(w,h/2);
- ctx.stroke();
-
- requestAnimationFrame(draw);
-}
-
-draw();
-
-/* WEBXR */
-
-const scene=new THREE.Scene();
-scene.background=new THREE.Color(0x020812);
-
-const camera=new THREE.PerspectiveCamera(
- 70,innerWidth/innerHeight,.01,100
-);
-
-const renderer=new THREE.WebGLRenderer({antialias:true});
-renderer.setPixelRatio(Math.min(devicePixelRatio,2));
-renderer.setSize(innerWidth,innerHeight);
-renderer.xr.enabled=true;
-
-const texture=new THREE.CanvasTexture(canvas);
-
-const screen=new THREE.Mesh(
- new THREE.PlaneGeometry(2.5,1.35),
- new THREE.MeshBasicMaterial({
-  map:texture,
-  side:THREE.DoubleSide
- })
-);
-
-screen.position.set(0,1.6,-2);
-scene.add(screen);
-
-const frame=new THREE.Mesh(
- new THREE.PlaneGeometry(2.57,1.42),
- new THREE.MeshBasicMaterial({
-  color:0x087b9c,
-  side:THREE.DoubleSide
- })
-);
-
-frame.position.set(0,1.6,-2.015);
-scene.add(frame);
-frame.add(screen);
-screen.position.set(0,0,.012);
-
-const grid=new THREE.GridHelper(
- 30,30,0x164c66,0x102b3c
-);
-scene.add(grid);
-
-document.body.appendChild(renderer.domElement);
-renderer.domElement.style.display='none';
-
-renderer.setAnimationLoop(()=>{
- texture.needsUpdate=true;
- renderer.render(scene,camera);
-});
-
-window.addEventListener('resize',()=>{
- camera.aspect=innerWidth/innerHeight;
- camera.updateProjectionMatrix();
- renderer.setSize(innerWidth,innerHeight);
-});
-
-document.getElementById('vr').onclick=async()=>{
- try{
-  if(!navigator.xr){
-   status.textContent='WebXR unavailable.';
-   return;
-  }
-
-  const supported=await navigator.xr
-   .isSessionSupported('immersive-vr');
-
-  if(!supported){
-   status.textContent='Immersive VR unavailable.';
-   return;
-  }
-
-  const session=await navigator.xr.requestSession(
-   'immersive-vr',
-   {optionalFeatures:['local-floor']}
-  );
-
-  await renderer.xr.setSession(session);
-
-  renderer.domElement.style.display='block';
-  status.textContent='VR session active.';
-
-  session.addEventListener('end',()=>{
-   renderer.domElement.style.display='none';
-   status.textContent='VR session ended.';
-  });
-
- }catch(error){
-  status.textContent='VR error: '+error.message;
- }
-};
-</script>
-</body>
-</html>
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+const $=id=>document.getElementById(id);let renderer,scene,camera,ctx,stream,source,splitter,aL,aR,aM,dL,dR,dM,channels=1,ready=false,session=null,last=0;
+const N=20, sprites=[];
+function glow(){const c=document.createElement('canvas');c.width=c.height=128;const x=c.getContext('2d'),g=x.createRadialGradient(64,64,1,64,64,63);g.addColorStop(0,'#fff');g.addColorStop(.12,'rgba(255,255,255,.9)');g.addColorStop(.36,'rgba(255,255,255,.3)');g.addColorStop(1,'rgba(255,255,255,0)');x.fillStyle=g;x.fillRect(0,0,128,128);return new THREE.CanvasTexture(c)}
+scene=new THREE.Scene();scene.background=new THREE.Color(0x000000);camera=new THREE.PerspectiveCamera(70,innerWidth/innerHeight,.05,50);
+renderer=new THREE.WebGLRenderer({antialias:true});renderer.setPixelRatio(Math.min(devicePixelRatio,1.5));renderer.setSize(innerWidth,innerHeight);renderer.xr.enabled=true;$('scene').appendChild(renderer.domElement);
+const group=new THREE.Group();scene.add(group);const tex=glow();
+for(let i=0;i<N;i++){const m=new THREE.SpriteMaterial({map:tex,color:0xffffff,transparent:true,opacity:0,blending:THREE.AdditiveBlending,depthWrite:false});const s=new THREE.Sprite(m);s.position.set(0,0,-2.8);s.scale.set(.1,.1,1);s.userData.level=0;group.add(s);sprites.push(s)}
+function freq(i){return 65*Math.pow(9000/65,i/(N-1))}
+function bin(f,a){return Math.max(0,Math.min(a.frequencyBinCount-1,Math.round(f/(ctx.sampleRate/2)*a.frequencyBinCount)))}
+function energy(data,a,i){let lo=bin(freq(Math.max(0,i-.5)),a),hi=Math.max(lo+1,bin(freq(Math.min(N-1,i+.5)),a)),sum=0,count=0;for(let k=lo;k<=hi&&k<data.length;k++){let v=10**(data[k]/20);sum+=v*v;count++}return Math.sqrt(sum/Math.max(1,count))}
+function frame(t){if(t-last>25){update();last=t}renderer.render(scene,camera)}
+renderer.setAnimationLoop(frame);
+function update(){if(!ready){$('level').style.width='0';return}
+if(channels>=2){aL.getFloatFrequencyData(dL);aR.getFloatFrequencyData(dR)}else aM.getFloatFrequencyData(dM);
+let total=0;
+for(let i=0;i<N;i++){let l,r,e,pan=0;if(channels>=2){l=energy(dL,aL,i);r=energy(dR,aR,i);e=Math.sqrt((l*l+r*r)/2);pan=(r-l)/(r+l+1e-7)}else e=energy(dM,aM,i);
+total+=e;let db=20*Math.log10(e+1e-7),v=Math.max(0,Math.min(1,(db+88)/88));v=Math.max(0,(v-.04)/.96);let s=sprites[i];s.userData.level+=(v*v-s.userData.level)*.24;let q=s.userData.level;
+let hue=220*(1-i/(N-1));s.material.color.setHSL(hue/360,1,.56);s.material.opacity=Math.min(.98,q*1.5);let size=.035+q*.75;s.scale.set(size,size,1);
+let az=pan*1.18,dist=2.2+(1-q)*.6,y=(i/(N-1)-.5)*1.2;s.position.set(Math.sin(az)*dist,y,-Math.cos(az)*dist)}
+$('level').style.width=Math.min(100,total*140)+'%'}
+$('start').onclick=async()=>{try{if(!navigator.mediaDevices?.getUserMedia)throw Error('Microphone indisponible : ouvre cette page en HTTPS dans Meta Quest Browser.');
+$('status').textContent='Demande de permission…';stream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:{ideal:2},echoCancellation:false,noiseSuppression:false,autoGainControl:false}});
+ctx=new AudioContext();await ctx.resume();source=ctx.createMediaStreamSource(stream);channels=Math.min(2,stream.getAudioTracks()[0].getSettings().channelCount||1);
+if(channels>=2){splitter=ctx.createChannelSplitter(2);aL=ctx.createAnalyser();aR=ctx.createAnalyser();aL.fftSize=aR.fftSize=4096;aL.smoothingTimeConstant=aR.smoothingTimeConstant=.72;source.connect(splitter);splitter.connect(aL,0);splitter.connect(aR,1);dL=new Float32Array(aL.frequencyBinCount);dR=new Float32Array(aR.frequencyBinCount)}
+else{aM=ctx.createAnalyser();aM.fftSize=4096;aM.smoothingTimeConstant=.72;source.connect(aM);dM=new Float32Array(aM.frequencyBinCount)}
+ready=true;$('start').disabled=true;$('stop').disabled=false;$('vr').disabled=!(navigator.xr&&await navigator.xr.isSessionSupported('immersive-vr'));
+$('status').textContent=channels>=2?'Stéréo détectée : estimation gauche/droite active.':'Mono détecté : les taches seront centrées, sans direction.'}
+catch(e){$('status').textContent=e.message||'Erreur microphone';console.error(e)}};
+$('stop').onclick=()=>{ready=false;stream?.getTracks().forEach(t=>t.stop());ctx?.close();ctx=stream=null;$('start').disabled=false;$('stop').disabled=true;$('vr').disabled=true;$('status').textContent='Micro arrêté.'};
+$('vr').onclick=async()=>{try{session=await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor']});await renderer.xr.setSession(session);document.body.classList.add('in-vr');session.addEventListener('end',()=>{document.body.classList.remove('in-vr');session=null})}catch(e){$('status').textContent=e.message||'Impossible de démarrer la VR'}};
+addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)});
+</script></body></html>
