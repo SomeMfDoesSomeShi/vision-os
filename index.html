@@ -4,248 +4,306 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>VISION OS</title>
+<title>VISION OS - Sound Vision</title>
 <style>
 *{box-sizing:border-box}
-body{margin:0;background:#07111c;color:#e5f8ff;font-family:Arial,sans-serif}
-header{padding:20px;color:#55dfff;font-size:24px;font-weight:bold;letter-spacing:5px}
-main{padding:15px;max-width:1000px;margin:auto}
-.panel{background:#102333;border:1px solid #28516a;border-radius:15px;padding:15px;margin-bottom:15px}
-canvas{width:100%;background:#020609;border-radius:10px;display:block}
-button,.file{background:#12384c;color:white;border:1px solid #3b819e;border-radius:9px;padding:12px;margin:4px;cursor:pointer}
-button.active{background:#087b9c}
-input{accent-color:#43dfff}
-.row{display:flex;flex-wrap:wrap;align-items:center}
-h3{color:#68dfff;font-size:14px}
-small{color:#8ba9bb}
-#video{display:none}
+body{
+ margin:0;background:#050c14;color:#e4faff;
+ font-family:Arial,sans-serif
+}
+header{padding:22px;color:#55dcff;
+ font-size:25px;font-weight:bold;letter-spacing:5px}
+main{max-width:850px;margin:auto;padding:15px}
+.panel{
+ background:#102333;border:1px solid #28536b;
+ border-radius:16px;padding:18px;margin-bottom:15px
+}
+h3{color:#64dcff;font-size:14px;letter-spacing:2px}
+button{
+ background:#075574;color:white;border:1px solid #39caff;
+ border-radius:9px;padding:13px 18px;margin:5px;
+ cursor:pointer
+}
+button:disabled{opacity:.5}
+canvas{width:100%;display:block;border-radius:10px}
+input{accent-color:#40dfff;width:100%}
+.status{font-size:12px;color:#8db4c8}
+#intensity{
+ height:14px;background:#06121b;border-radius:20px;
+ overflow:hidden;margin-top:12px
+}
+#level{
+ height:100%;width:0%;
+ background:linear-gradient(90deg,#087cff,#00eaff,#ff2929);
+ transition:width .05s
+}
 </style>
 </head>
 <body>
 <header>VISION OS</header>
 <main>
 <section class="panel">
-<h3>VISUAL DISPLAY</h3>
-<canvas id="screen" width="1280" height="720"></canvas>
-<div class="row">
-<input type="file" id="file" accept="image/*,video/*">
-</div>
-<div class="row">
-<button data-mode="normal" class="active">Normal</button>
-<button data-mode="gray">Noir et blanc</button>
-<button data-mode="mirrorX">Miroir horizontal</button>
-<button data-mode="mirrorY">Miroir vertical</button>
-<button data-mode="sound">Vision sonore</button>
-</div>
-<h3>ZOOM</h3>
-<input id="zoom" type="range" min="1" max="5" step=".1" value="1">
-<h3>POSITION</h3>
-<label>X <input id="x" type="range" min="-1" max="1" step=".01" value="0"></label>
-<label>Y <input id="y" type="range" min="-1" max="1" step=".01" value="0"></label>
+<h3>SOUND VISION</h3>
+<canvas id="visual" width="1200" height="650"></canvas>
+<h3>SOUND INTENSITY</h3>
+<div id="intensity"><div id="level"></div></div>
+<p id="db" class="status">Waiting for microphone...</p>
 </section>
 
 <section class="panel">
-<h3>SON</h3>
-<button id="mic">Activer le microphone</button>
-<button id="stop">Arrêter</button>
-<p id="status">Microphone désactivé.</p>
-<canvas id="spectrum" width="600" height="150"></canvas>
-<h3>RÉALITÉ VIRTUELLE</h3>
-<button id="vr">Entrer en VR</button>
-<p id="vrstatus"></p>
-<small>
-Cette application applique les filtres à une image ou vidéo importée.
-Elle ne peut pas modifier directement le passthrough du Quest 3S.
-</small>
+<h3>CONTROLS</h3>
+<button id="start">ACTIVATE MICROPHONE</button>
+<button id="stop">STOP</button>
+<button id="vr">ENTER VR</button>
+<p id="status" class="status">Microphone disabled.</p>
+
+<h3>SENSITIVITY</h3>
+<input id="sensitivity" type="range"
+ min="0.5" max="4" step="0.1" value="2">
+<p class="status">Adjusts visual brightness.</p>
 </section>
 </main>
-
-<video id="video" playsinline loop muted></video>
 
 <script type="module">
 import * as THREE from
 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
-import {VRButton} from
-'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/webxr/VRButton.js';
 
-const canvas=document.getElementById('screen');
+const canvas=document.getElementById('visual');
 const ctx=canvas.getContext('2d');
-const spectrum=document.getElementById('spectrum');
-const sctx=spectrum.getContext('2d');
-const video=document.getElementById('video');
 
-let source=null;
-let mode='normal';
-let zoom=1,px=0,py=0;
-let analyser=null,stream=null,audio=null;
-let data=null;
+let audio=null;
+let analyser=null;
+let stream=null;
+let frequencies=null;
+let waveform=null;
+let active=false;
+let sensitivity=2;
+let smoothedLevel=0;
 
-document.getElementById('file').onchange=e=>{
- const f=e.target.files[0];
- if(!f)return;
- const url=URL.createObjectURL(f);
- if(f.type.startsWith('video')){
-  video.src=url;
-  video.onloadeddata=()=>{
-   source=video;
-   video.play();
-  };
- }else{
-  const img=new Image();
-  img.onload=()=>source=img;
-  img.src=url;
- }
+const status=document.getElementById('status');
+const levelBar=document.getElementById('level');
+const dbText=document.getElementById('db');
+
+document.getElementById('sensitivity').oninput=e=>{
+ sensitivity=Number(e.target.value);
 };
 
-document.querySelectorAll('[data-mode]').forEach(b=>{
- b.onclick=()=>{
-  mode=b.dataset.mode;
-  document.querySelectorAll('[data-mode]').forEach(x=>
-   x.classList.toggle('active',x===b));
- };
-});
+async function startAudio(){
+ try{
+  stream=await navigator.mediaDevices.getUserMedia({
+   audio:{
+    echoCancellation:false,
+    noiseSuppression:false,
+    autoGainControl:false
+   }
+  });
 
-document.getElementById('zoom').oninput=e=>zoom=+e.target.value;
-document.getElementById('x').oninput=e=>px=+e.target.value;
-document.getElementById('y').oninput=e=>py=+e.target.value;
+  audio=new AudioContext();
+  await audio.resume();
+
+  analyser=audio.createAnalyser();
+  analyser.fftSize=4096;
+  analyser.smoothingTimeConstant=0.65;
+
+  const input=audio.createMediaStreamSource(stream);
+  input.connect(analyser);
+
+  frequencies=new Uint8Array(analyser.frequencyBinCount);
+  waveform=new Uint8Array(analyser.fftSize);
+
+  active=true;
+  status.textContent='Microphone active.';
+ }catch(error){
+  status.textContent='Microphone error: '+error.message;
+ }
+}
+
+function stopAudio(){
+ active=false;
+
+ if(stream){
+  stream.getTracks().forEach(t=>t.stop());
+  stream=null;
+ }
+
+ if(audio){
+  audio.close();
+  audio=null;
+ }
+
+ analyser=null;
+ status.textContent='Microphone disabled.';
+}
+
+document.getElementById('start').onclick=startAudio;
+document.getElementById('stop').onclick=stopAudio;
 
 function draw(){
- const w=canvas.width,h=canvas.height;
- ctx.clearRect(0,0,w,h);
+ const w=canvas.width;
+ const h=canvas.height;
 
- if(mode==='sound'){
-  drawSound();
+ ctx.fillStyle='#02080e';
+ ctx.fillRect(0,0,w,h);
+
+ if(!active || !analyser){
+  ctx.fillStyle='#65dfff';
+  ctx.font='32px Arial';
+  ctx.fillText('WAITING FOR AUDIO',390,320);
   requestAnimationFrame(draw);
   return;
  }
 
- if(!source){
-  ctx.fillStyle='#06131d';
-  ctx.fillRect(0,0,w,h);
-  ctx.fillStyle='#6bcde8';
-  ctx.font='30px Arial';
-  ctx.fillText('IMPORTER UNE IMAGE OU VIDEO',300,350);
-  requestAnimationFrame(draw);
-  return;
+ analyser.getByteFrequencyData(frequencies);
+ analyser.getByteTimeDomainData(waveform);
+
+ // Overall audio intensity from RMS
+ let sum=0;
+ for(let i=0;i<waveform.length;i++){
+  const v=(waveform[i]-128)/128;
+  sum+=v*v;
+ }
+ const rms=Math.sqrt(sum/waveform.length);
+ const intensity=Math.min(1,rms*5);
+
+ smoothedLevel+=(intensity-smoothedLevel)*0.2;
+
+ levelBar.style.width=(smoothedLevel*100)+'%';
+ dbText.textContent='Relative sound intensity: '+
+  Math.round(smoothedLevel*100)+'%';
+
+ // Frequency visualization
+ const columns=120;
+ const colWidth=w/columns;
+
+ for(let x=0;x<columns;x++){
+  // Logarithmic frequency distribution
+  const t=x/(columns-1);
+  const start=Math.floor(Math.pow(t,2)*frequencies.length);
+  const end=Math.max(start+1,
+   Math.floor(Math.pow((x+1)/columns,2)*frequencies.length));
+
+  let sum=0;
+  for(let i=start;i<end;i++)sum+=frequencies[i];
+
+  const amplitude=(sum/(end-start))/255;
+  const brightness=Math.min(100,
+   4+amplitude*85*sensitivity);
+
+  // Low frequencies blue, high frequencies red
+  const hue=220-t*220;
+
+  ctx.fillStyle=`hsl(${hue},100%,${brightness}%)`;
+
+  const barHeight=amplitude*h*.9;
+  const y=(h-barHeight)/2;
+
+  ctx.fillRect(x*colWidth,y,colWidth-2,barHeight);
  }
 
- const sw=source.videoWidth||source.naturalWidth;
- const sh=source.videoHeight||source.naturalHeight;
- const scale=Math.max(w/sw,h/sh)*zoom;
- const dw=sw*scale,dh=sh*scale;
- const dx=(w-dw)/2+px*w*.35;
- const dy=(h-dh)/2+py*h*.35;
-
- ctx.save();
- ctx.translate(w/2,h/2);
- ctx.scale(mode==='mirrorX'?-1:1,mode==='mirrorY'?-1:1);
- ctx.translate(-w/2,-h/2);
- ctx.filter=mode==='gray'?'grayscale(1)':'none';
- ctx.drawImage(source,dx,dy,dw,dh);
- ctx.restore();
- ctx.filter='none';
+ // Central frequency reference
+ ctx.strokeStyle='#ffffff22';
+ ctx.lineWidth=2;
+ ctx.beginPath();
+ ctx.moveTo(0,h/2);
+ ctx.lineTo(w,h/2);
+ ctx.stroke();
 
  requestAnimationFrame(draw);
 }
 
-function drawSound(){
- const w=canvas.width,h=canvas.height;
- ctx.fillStyle='#020609';
- ctx.fillRect(0,0,w,h);
-
- if(!analyser){
-  ctx.fillStyle='white';
-  ctx.font='28px Arial';
-  ctx.fillText('ACTIVE LE MICROPHONE',400,360);
-  return;
- }
-
- analyser.getByteFrequencyData(data);
- const bars=100;
- for(let i=0;i<bars;i++){
-  const value=data[Math.floor(i/bars*data.length)]/255;
-  const hue=220-i/bars*220;
-  const brightness=8+value*75;
-  ctx.fillStyle=`hsl(${hue},100%,${brightness}%)`;
-  ctx.fillRect(i*w/bars,0,w/bars+1,h);
- }
-}
-
-async function startMic(){
- try{
-  stream=await navigator.mediaDevices.getUserMedia({audio:true});
-  audio=new AudioContext();
-  analyser=audio.createAnalyser();
-  analyser.fftSize=2048;
-  audio.createMediaStreamSource(stream).connect(analyser);
-  data=new Uint8Array(analyser.frequencyBinCount);
-  document.getElementById('status').textContent='Microphone actif';
- }catch(e){
-  document.getElementById('status').textContent=e.message;
- }
-}
-
-document.getElementById('mic').onclick=startMic;
-document.getElementById('stop').onclick=()=>{
- if(stream)stream.getTracks().forEach(t=>t.stop());
- if(audio)audio.close();
- stream=null;audio=null;analyser=null;
- document.getElementById('status').textContent='Microphone désactivé';
-};
-
 draw();
 
-/* SCENE VR */
+/* WEBXR */
 
 const scene=new THREE.Scene();
-scene.background=new THREE.Color(0x020912);
+scene.background=new THREE.Color(0x020812);
 
 const camera=new THREE.PerspectiveCamera(
  70,innerWidth/innerHeight,.01,100
 );
 
 const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
 renderer.setSize(innerWidth,innerHeight);
 renderer.xr.enabled=true;
-renderer.domElement.style.position='fixed';
-renderer.domElement.style.inset='0';
-renderer.domElement.style.zIndex='-1';
-document.body.appendChild(renderer.domElement);
 
 const texture=new THREE.CanvasTexture(canvas);
+
 const screen=new THREE.Mesh(
- new THREE.PlaneGeometry(2.4,1.35),
- new THREE.MeshBasicMaterial({map:texture,side:THREE.DoubleSide})
+ new THREE.PlaneGeometry(2.5,1.35),
+ new THREE.MeshBasicMaterial({
+  map:texture,
+  side:THREE.DoubleSide
+ })
 );
+
 screen.position.set(0,1.6,-2);
 scene.add(screen);
 
-const grid=new THREE.GridHelper(20,20,0x15516a,0x102b3a);
+const frame=new THREE.Mesh(
+ new THREE.PlaneGeometry(2.57,1.42),
+ new THREE.MeshBasicMaterial({
+  color:0x087b9c,
+  side:THREE.DoubleSide
+ })
+);
+
+frame.position.set(0,1.6,-2.015);
+scene.add(frame);
+frame.add(screen);
+screen.position.set(0,0,.012);
+
+const grid=new THREE.GridHelper(
+ 30,30,0x164c66,0x102b3c
+);
 scene.add(grid);
+
+document.body.appendChild(renderer.domElement);
+renderer.domElement.style.display='none';
 
 renderer.setAnimationLoop(()=>{
  texture.needsUpdate=true;
  renderer.render(scene,camera);
 });
 
-window.onresize=()=>{
+window.addEventListener('resize',()=>{
  camera.aspect=innerWidth/innerHeight;
  camera.updateProjectionMatrix();
  renderer.setSize(innerWidth,innerHeight);
-};
-
-const vrButton=VRButton.createButton(renderer);
-vrButton.style.display='none';
-document.body.appendChild(vrButton);
+});
 
 document.getElementById('vr').onclick=async()=>{
  try{
-  const supported=await navigator.xr.isSessionSupported('immersive-vr');
-  if(supported)vrButton.click();
-  else document.getElementById('vrstatus').textContent=
-   'VR non supportée par ce navigateur';
- }catch(e){
-  document.getElementById('vrstatus').textContent=e.message;
+  if(!navigator.xr){
+   status.textContent='WebXR unavailable.';
+   return;
+  }
+
+  const supported=await navigator.xr
+   .isSessionSupported('immersive-vr');
+
+  if(!supported){
+   status.textContent='Immersive VR unavailable.';
+   return;
+  }
+
+  const session=await navigator.xr.requestSession(
+   'immersive-vr',
+   {optionalFeatures:['local-floor']}
+  );
+
+  await renderer.xr.setSession(session);
+
+  renderer.domElement.style.display='block';
+  status.textContent='VR session active.';
+
+  session.addEventListener('end',()=>{
+   renderer.domElement.style.display='none';
+   status.textContent='VR session ended.';
+  });
+
+ }catch(error){
+  status.textContent='VR error: '+error.message;
  }
 };
 </script>
