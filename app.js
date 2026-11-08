@@ -1,4 +1,3 @@
-
 import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
 
 // ==========================================
@@ -31,14 +30,20 @@ let session = null;
 let referenceSpace = null;
 
 let isRunning = false;
+let isRescanning = false;
+
 let roomCaptureTimer = null;
 let roomCaptureAttempted = false;
+let forceRoomCaptureOnStart = false;
 
 let roomCaptureStatus = "Non déclenché";
 let enabledFeatures = [];
 
 let latestPlaneCount = 0;
 let latestMeshCount = 0;
+
+let overlayRoot = null;
+let rescanButton = null;
 
 const planeVisuals = new Map();
 const meshVisuals = new Map();
@@ -105,6 +110,91 @@ function createDepthMaterial() {
 }
 
 // ==========================================
+// INTERFACE RESCAN
+// ==========================================
+
+function createRescanButton() {
+    if (overlayRoot) return;
+
+    overlayRoot = document.createElement("div");
+
+    Object.assign(overlayRoot.style, {
+        position: "fixed",
+        inset: "0",
+        pointerEvents: "none",
+        zIndex: "100000"
+    });
+
+    rescanButton = document.createElement("button");
+
+    rescanButton.textContent = "↻ RESCAN";
+
+    Object.assign(rescanButton.style, {
+        position: "absolute",
+        top: "20px",
+        right: "20px",
+        padding: "16px 24px",
+        background: "#ffffff",
+        color: "#000000",
+        border: "2px solid #777",
+        borderRadius: "12px",
+        fontSize: "18px",
+        fontWeight: "bold",
+        pointerEvents: "auto",
+        cursor: "pointer"
+    });
+
+    rescanButton.addEventListener("click", rescanRoom);
+
+    overlayRoot.appendChild(rescanButton);
+    document.body.appendChild(overlayRoot);
+}
+
+function setRescanButtonVisible(visible) {
+    if (overlayRoot) {
+        overlayRoot.style.display = visible ? "block" : "none";
+    }
+}
+
+// ==========================================
+// RESCAN
+// ==========================================
+
+async function rescanRoom() {
+    if (!session || !isRunning || isRescanning) return;
+
+    isRescanning = true;
+
+    if (rescanButton) {
+        rescanButton.disabled = true;
+        rescanButton.textContent = "RESCAN...";
+    }
+
+    messageElement.textContent =
+        "Préparation d'une nouvelle capture...";
+
+    statusElement.textContent = "Rescannage";
+
+    if (roomCaptureTimer !== null) {
+        clearTimeout(roomCaptureTimer);
+        roomCaptureTimer = null;
+    }
+
+    try {
+        await session.end();
+    } catch (error) {
+        console.error("Erreur pendant le rescannage :", error);
+
+        isRescanning = false;
+
+        if (rescanButton) {
+            rescanButton.disabled = false;
+            rescanButton.textContent = "↻ RESCAN";
+        }
+    }
+}
+
+// ==========================================
 // DIAGNOSTIC
 // ==========================================
 
@@ -112,19 +202,23 @@ function logCapabilities() {
     console.group("QUEST DISTANCE SCANNER");
 
     console.log("XR activé :", !!navigator.xr);
-    console.log("Fonction Room Capture :", 
+
+    console.log(
+        "Fonction Room Capture :",
         typeof session?.initiateRoomCapture === "function"
     );
 
     console.log("Fonctionnalités activées :", enabledFeatures);
 
-    console.log("Repère spatial :", 
+    console.log(
+        "Repère spatial :",
         enabledFeatures.includes("unbounded")
             ? "unbounded"
             : "local-floor"
     );
 
-    console.log("Mesh Detection demandé :", 
+    console.log(
+        "Mesh Detection :",
         enabledFeatures.includes("mesh-detection")
     );
 
@@ -260,7 +354,9 @@ function createMeshVisual() {
     return {
         group,
         mesh,
-        lastChangedTime: null
+        lastChangedTime: null,
+        vertexCount: 0,
+        indexCount: 0
     };
 }
 
@@ -283,13 +379,15 @@ function updateMeshGeometry(visual, xrMesh) {
 
     const changedTime = xrMesh.lastChangedTime;
 
-    // Éviter de reconstruire la géométrie
-    // si le système n'a rien modifié.
+    const vertexCount = vertices.length;
+    const indexCount = indices.length;
 
-    if (
-        changedTime !== undefined &&
-        changedTime === visual.lastChangedTime
-    ) {
+    const geometryChanged =
+        changedTime !== visual.lastChangedTime ||
+        vertexCount !== visual.vertexCount ||
+        indexCount !== visual.indexCount;
+
+    if (!geometryChanged && visual.vertexCount > 0) {
         return true;
     }
 
@@ -312,6 +410,15 @@ function updateMeshGeometry(visual, xrMesh) {
     visual.mesh.geometry = geometry;
 
     visual.lastChangedTime = changedTime ?? null;
+    visual.vertexCount = vertexCount;
+    visual.indexCount = indexCount;
+
+    console.info("Géométrie actualisée :", {
+        label: xrMesh.semanticLabel,
+        vertices: vertexCount / 3,
+        indices: indexCount,
+        lastChangedTime: changedTime
+    });
 
     return true;
 }
@@ -376,13 +483,12 @@ async function initiateRoomCapture() {
 
     roomCaptureAttempted = true;
 
-    // La documentation Meta recommande
-    // d'appeler cette fonction lorsqu'aucun
-    // plan n'a été détecté après 2 à 3 secondes.
-
-    if (latestPlaneCount > 0) {
+    if (
+        latestPlaneCount > 0 &&
+        !forceRoomCaptureOnStart
+    ) {
         roomCaptureStatus =
-            "Non nécessaire : des plans sont déjà détectés.";
+            "Plans déjà détectés : capture automatique ignorée.";
 
         console.info(roomCaptureStatus);
         return;
@@ -429,18 +535,25 @@ async function initiateRoomCapture() {
 // DÉMARRAGE DU SCANNER
 // ==========================================
 
-async function enterAR() {
+async function enterAR(forceCapture = false) {
     startButton.disabled = true;
 
+    forceRoomCaptureOnStart = forceCapture;
+
     messageElement.textContent =
-        "Initialisation du scanner et des capacités spatiales...";
+        forceCapture
+            ? "Relancement de la capture spatiale..."
+            : "Initialisation du scanner et des capacités spatiales...";
 
     roomCaptureAttempted = false;
     roomCaptureStatus = "En attente";
+
     latestPlaneCount = 0;
     latestMeshCount = 0;
 
     try {
+        createRescanButton();
+
         session = await navigator.xr.requestSession(
             "immersive-ar",
             {
@@ -452,8 +565,13 @@ async function enterAR() {
                 optionalFeatures: [
                     "unbounded",
                     "mesh-detection",
-                    "hand-tracking"
-                ]
+                    "hand-tracking",
+                    "dom-overlay"
+                ],
+
+                domOverlay: {
+                    root: overlayRoot
+                }
             }
         );
 
@@ -461,55 +579,52 @@ async function enterAR() {
             session.enabledFeatures || []
         );
 
-        // Choisir le repère spatial selon les capacités
-        // réellement activées par le navigateur.
-
         const referenceType =
             enabledFeatures.includes("unbounded")
                 ? "unbounded"
                 : "local-floor";
 
-        renderer = new THREE.WebGLRenderer({
-            alpha: true,
-            antialias: true,
-            powerPreference: "high-performance"
-        });
+        if (!renderer) {
+            renderer = new THREE.WebGLRenderer({
+                alpha: true,
+                antialias: true,
+                powerPreference: "high-performance"
+            });
 
-        renderer.setPixelRatio(
-            Math.min(window.devicePixelRatio, 1.5)
-        );
+            renderer.setPixelRatio(
+                Math.min(window.devicePixelRatio, 1.5)
+            );
 
-        renderer.setSize(
-            window.innerWidth,
-            window.innerHeight
-        );
+            renderer.setSize(
+                window.innerWidth,
+                window.innerHeight
+            );
 
-        renderer.xr.enabled = true;
+            renderer.xr.enabled = true;
+
+            renderer.domElement.style.position = "fixed";
+            renderer.domElement.style.inset = "0";
+            renderer.domElement.style.width = "100vw";
+            renderer.domElement.style.height = "100vh";
+            renderer.domElement.style.zIndex = "9999";
+
+            document.body.appendChild(renderer.domElement);
+
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x000000);
+
+            camera = new THREE.PerspectiveCamera(
+                70,
+                window.innerWidth / window.innerHeight,
+                0.01,
+                100
+            );
+        }
 
         renderer.xr.setReferenceSpaceType(referenceType);
 
-        // Fond noir opaque : aucune image réelle de la pièce.
-
         renderer.setClearColor(0x000000, 1);
         renderer.setClearAlpha(1);
-
-        renderer.domElement.style.position = "fixed";
-        renderer.domElement.style.inset = "0";
-        renderer.domElement.style.width = "100vw";
-        renderer.domElement.style.height = "100vh";
-        renderer.domElement.style.zIndex = "9999";
-
-        document.body.appendChild(renderer.domElement);
-
-        scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x000000);
-
-        camera = new THREE.PerspectiveCamera(
-            70,
-            window.innerWidth / window.innerHeight,
-            0.01,
-            100
-        );
 
         await renderer.xr.setSession(session);
 
@@ -524,6 +639,14 @@ async function enterAR() {
         document.body.classList.add("xr-active");
 
         isRunning = true;
+        isRescanning = false;
+
+        setRescanButtonVisible(true);
+
+        if (rescanButton) {
+            rescanButton.disabled = false;
+            rescanButton.textContent = "↻ RESCAN";
+        }
 
         statusElement.textContent = "Scanner actif";
 
@@ -534,20 +657,33 @@ async function enterAR() {
 
         logCapabilities();
 
-        // Laisser le temps aux plans d'arriver.
-        // Si aucun plan n'est détecté, déclencher Room Capture.
-
         roomCaptureTimer = setTimeout(
             initiateRoomCapture,
             ROOM_CAPTURE_DELAY
         );
 
-        session.addEventListener("end", stopAR);
+        session.addEventListener("end", () => {
+            if (isRescanning) {
+                isRunning = false;
+                session = null;
+
+                console.info(
+                    "Ancienne session terminée. Relancement du scanner."
+                );
+
+                enterAR(true);
+                return;
+            }
+
+            stopAR();
+        }, { once: true });
 
         renderer.setAnimationLoop(renderFrame);
 
         messageElement.textContent =
-            "Scanner actif. Attends la détection de la pièce.";
+            forceCapture
+                ? "Nouvelle session active. Demande de capture en préparation."
+                : "Scanner actif. Attends la détection de la pièce.";
 
     } catch (error) {
         console.error(error);
@@ -561,11 +697,22 @@ async function enterAR() {
             } catch (_) {}
         }
 
+        if (isRescanning) {
+            isRescanning = false;
+        }
+
         if (renderer) {
+            renderer.setAnimationLoop(null);
             renderer.dispose();
             renderer.domElement.remove();
             renderer = null;
         }
+
+        if (scene) {
+            disposeScene();
+        }
+
+        setRescanButtonVisible(false);
 
         startButton.disabled = false;
     }
@@ -590,13 +737,9 @@ function renderFrame(time, frame) {
         viewerPose.transform.position.z
     );
 
-    // Plans détectés.
-
     const planes = frame.detectedPlanes
         ? Array.from(frame.detectedPlanes)
         : [];
-
-    // Maillages détectés.
 
     const meshes = frame.detectedMeshes
         ? Array.from(frame.detectedMeshes)
@@ -606,10 +749,6 @@ function renderFrame(time, frame) {
     latestMeshCount = meshes.length;
 
     let nearestDistance = Infinity;
-
-    // Accumulation des plans.
-    // On ne supprime plus ceux qui disparaissent
-    // temporairement du tableau détecté.
 
     for (const plane of planes) {
         const center = updatePlane(plane, frame);
@@ -622,8 +761,6 @@ function renderFrame(time, frame) {
         }
     }
 
-    // Accumulation des maillages.
-
     for (const xrMesh of meshes) {
         const center = updateDetectedMesh(xrMesh, frame);
 
@@ -634,8 +771,6 @@ function renderFrame(time, frame) {
             );
         }
     }
-
-    // Tableau de bord.
 
     planeCountElement.textContent =
         planeVisuals.size + meshVisuals.size;
@@ -649,11 +784,40 @@ function renderFrame(time, frame) {
 }
 
 // ==========================================
-// ARRÊT ET RAPPORT
+// NETTOYAGE DE LA SCÈNE
+// ==========================================
+
+function disposeScene() {
+    if (!scene) return;
+
+    for (const visual of planeVisuals.values()) {
+        scene.remove(visual.group);
+
+        visual.mesh.geometry.dispose();
+        visual.mesh.material.dispose();
+    }
+
+    for (const visual of meshVisuals.values()) {
+        scene.remove(visual.group);
+
+        visual.mesh.geometry.dispose();
+        visual.mesh.material.dispose();
+    }
+
+    planeVisuals.clear();
+    meshVisuals.clear();
+
+    scene.clear();
+    scene = null;
+}
+
+// ==========================================
+// ARRÊT FINAL
 // ==========================================
 
 function stopAR() {
     isRunning = false;
+    isRescanning = false;
 
     if (roomCaptureTimer !== null) {
         clearTimeout(roomCaptureTimer);
@@ -672,33 +836,24 @@ function stopAR() {
     console.info("RAPPORT FINAL DU SCAN");
     console.info(report);
 
-    for (const visual of planeVisuals.values()) {
-        scene.remove(visual.group);
-        visual.mesh.geometry.dispose();
-        visual.mesh.material.dispose();
-    }
-
-    for (const visual of meshVisuals.values()) {
-        scene.remove(visual.group);
-        visual.mesh.geometry.dispose();
-        visual.mesh.material.dispose();
-    }
-
-    planeVisuals.clear();
-    meshVisuals.clear();
-
     if (renderer) {
         renderer.setAnimationLoop(null);
+    }
+
+    disposeScene();
+
+    if (renderer) {
         renderer.dispose();
         renderer.domElement.remove();
         renderer = null;
     }
 
-    if (scene) {
-        scene.clear();
+    if (overlayRoot) {
+        overlayRoot.remove();
+        overlayRoot = null;
+        rescanButton = null;
     }
 
-    scene = null;
     camera = null;
     session = null;
     referenceSpace = null;
@@ -737,15 +892,17 @@ window.addEventListener("resize", () => {
 // INITIALISATION
 // ==========================================
 
-startButton.addEventListener("click", enterAR);
+startButton.addEventListener("click", () => enterAR(false));
 
 checkSupport();
 
 async function checkSupport() {
     if (!navigator.xr) {
         statusElement.textContent = "WebXR indisponible";
+
         messageElement.textContent =
             "Ouvre le site dans Meta Quest Browser.";
+
         return;
     }
 
@@ -758,6 +915,7 @@ async function checkSupport() {
         }
 
         statusElement.textContent = "WebXR détecté";
+
         messageElement.textContent =
             "Scanner prêt.";
 
