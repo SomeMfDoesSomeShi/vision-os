@@ -1,12 +1,18 @@
+
 import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
 
 // ==========================================
 // CONFIGURATION
 // ==========================================
 
-const MAX_DISTANCE = 6;
-const ROCK_HOLD_TIME = 700;
-const ROCK_COOLDOWN = 5000;
+const MIN_DISTANCE = 2;
+const MAX_DISTANCE = 12;
+const DEFAULT_DISTANCE = 6;
+
+const OPEN_HAND_HOLD_TIME = 5000;
+const PINCH_START_DISTANCE = 0.035;
+const PINCH_RELEASE_DISTANCE = 0.055;
+const SENSITIVITY_SPEED = 8;
 
 // ==========================================
 // ELEMENTS
@@ -31,23 +37,39 @@ let session = null;
 let referenceSpace = null;
 
 let isRunning = false;
-let roomCaptureAttempted = false;
 
+let roomCaptureAttempted = false;
 let roomCaptureStatus = "Non déclenché";
+
 let enabledFeatures = [];
 
 let latestPlaneCount = 0;
 let latestMeshCount = 0;
 
+// Sensibilité des couleurs
+let maxDistance = DEFAULT_DISTANCE;
+
+// Contrôle gestuel
+let openHandStart = null;
+let adjustmentMode = false;
+let controlHandedness = null;
+
+let isPinching = false;
+let previousPinchX = null;
+
+// Geste ROCK conservé pour Room Capture
 let rockStartTime = null;
-let lastRockTime = 0;
 let rockDetected = false;
+let lastRockTime = 0;
+
+const ROCK_HOLD_TIME = 700;
+const ROCK_COOLDOWN = 5000;
 
 const planeVisuals = new Map();
 const meshVisuals = new Map();
 
 // ==========================================
-// SHADERS DE PROFONDEUR
+// SHADERS
 // ==========================================
 
 const vertexShader = `
@@ -94,7 +116,7 @@ function createDepthMaterial() {
     return new THREE.ShaderMaterial({
         uniforms: {
             uMaxDistance: {
-                value: MAX_DISTANCE
+                value: maxDistance
             }
         },
         vertexShader,
@@ -108,36 +130,45 @@ function createDepthMaterial() {
 }
 
 // ==========================================
-// DIAGNOSTIC
+// SENSIBILITÉ
 // ==========================================
 
-function logCapabilities() {
-    console.group("QUEST DISTANCE SCANNER");
-
-    console.log("XR activé :", !!navigator.xr);
-
-    console.log(
-        "Room Capture :",
-        typeof session?.initiateRoomCapture === "function"
+function setSensitivity(value) {
+    maxDistance = THREE.MathUtils.clamp(
+        value,
+        MIN_DISTANCE,
+        MAX_DISTANCE
     );
 
-    console.log("Fonctionnalités :", enabledFeatures);
+    if (scene) {
+        scene.traverse(object => {
+            if (
+                object.material &&
+                object.material.uniforms &&
+                object.material.uniforms.uMaxDistance
+            ) {
+                object.material.uniforms.uMaxDistance.value =
+                    maxDistance;
+            }
+        });
+    }
 
-    console.log(
-        "Hand Tracking :",
-        enabledFeatures.includes("hand-tracking")
+    const sensitivityPercent = Math.round(
+        ((MAX_DISTANCE - maxDistance) /
+        (MAX_DISTANCE - MIN_DISTANCE)) * 100
     );
 
-    console.log(
-        "Mesh Detection :",
-        enabledFeatures.includes("mesh-detection")
-    );
+    console.log("Sensibilité actualisée :", {
+        distanceMaximale: maxDistance.toFixed(2),
+        sensibilite: sensitivityPercent + "%"
+    });
 
-    console.groupEnd();
+    messageElement.textContent =
+        `Sensibilité : ${sensitivityPercent}% | Portée : ${maxDistance.toFixed(1)} m`;
 }
 
 // ==========================================
-// DÉTECTION DU GESTE ROCK
+// HAND TRACKING
 // ==========================================
 
 function getJointPosition(frame, hand, jointName) {
@@ -154,14 +185,25 @@ function getJointPosition(frame, hand, jointName) {
 
     const p = pose.transform.position;
 
-    return new THREE.Vector3(p.x, p.y, p.z);
+    return new THREE.Vector3(
+        p.x,
+        p.y,
+        p.z
+    );
 }
 
-function distanceBetween(a, b) {
-    if (!a || !b) return 0;
+function jointDistance(frame, hand, jointA, jointB) {
+    const a = getJointPosition(frame, hand, jointA);
+    const b = getJointPosition(frame, hand, jointB);
+
+    if (!a || !b) return null;
 
     return a.distanceTo(b);
 }
+
+// ==========================================
+// DÉTECTION DES DOIGTS
+// ==========================================
 
 function isFingerExtended(
     frame,
@@ -184,15 +226,8 @@ function isFingerExtended(
 
     if (!proximal || !tip) return false;
 
-    const baseDistance = distanceBetween(
-        wrist,
-        proximal
-    );
-
-    const tipDistance = distanceBetween(
-        wrist,
-        tip
-    );
+    const baseDistance = wrist.distanceTo(proximal);
+    const tipDistance = wrist.distanceTo(tip);
 
     return tipDistance > baseDistance * 1.18;
 }
@@ -218,27 +253,324 @@ function isFingerCurled(
 
     if (!proximal || !tip) return false;
 
-    const baseDistance = distanceBetween(
-        wrist,
-        proximal
-    );
-
-    const tipDistance = distanceBetween(
-        wrist,
-        tip
-    );
+    const baseDistance = wrist.distanceTo(proximal);
+    const tipDistance = wrist.distanceTo(tip);
 
     return tipDistance < baseDistance * 1.18;
 }
+
+// ==========================================
+// DÉTECTION MAIN OUVERTE
+// ==========================================
+
+function isOpenHand(frame, hand) {
+    const wrist = getJointPosition(
+        frame,
+        hand,
+        "wrist"
+    );
+
+    if (!wrist) return false;
+
+    const index = isFingerExtended(
+        frame, hand, wrist,
+        "index-finger-phalanx-proximal",
+        "index-finger-tip"
+    );
+
+    const middle = isFingerExtended(
+        frame, hand, wrist,
+        "middle-finger-phalanx-proximal",
+        "middle-finger-tip"
+    );
+
+    const ring = isFingerExtended(
+        frame, hand, wrist,
+        "ring-finger-phalanx-proximal",
+        "ring-finger-tip"
+    );
+
+    const pinky = isFingerExtended(
+        frame, hand, wrist,
+        "pinky-finger-phalanx-proximal",
+        "pinky-finger-tip"
+    );
+
+    const thumb = isFingerExtended(
+        frame, hand, wrist,
+        "thumb-phalanx-proximal",
+        "thumb-tip"
+    );
+
+    return (
+        index &&
+        middle &&
+        ring &&
+        pinky &&
+        thumb
+    );
+}
+
+// ==========================================
+// DÉTECTION PINCEMENT
+// ==========================================
+
+function getPinchDistance(frame, hand) {
+    return jointDistance(
+        frame,
+        hand,
+        "thumb-tip",
+        "index-finger-tip"
+    );
+}
+
+function getPinchCenter(frame, hand) {
+    const thumb = getJointPosition(
+        frame,
+        hand,
+        "thumb-tip"
+    );
+
+    const index = getJointPosition(
+        frame,
+        hand,
+        "index-finger-tip"
+    );
+
+    if (!thumb || !index) return null;
+
+    return thumb.add(index).multiplyScalar(0.5);
+}
+
+// ==========================================
+// POSITION HORIZONTALE RELATIVE AU CASQUE
+// ==========================================
+
+function getViewerLocalX(position, viewerPose) {
+    const viewerMatrix = new THREE.Matrix4()
+        .fromArray(viewerPose.transform.matrix);
+
+    viewerMatrix.invert();
+
+    const localPosition = position.clone()
+        .applyMatrix4(viewerMatrix);
+
+    return localPosition.x;
+}
+
+// ==========================================
+// ACTIVATION DU MODE RÉGLAGE
+// ==========================================
+
+function activateAdjustmentMode(handedness) {
+    adjustmentMode = true;
+
+    controlHandedness = handedness;
+
+    isPinching = false;
+    previousPinchX = null;
+
+    openHandStart = null;
+
+    console.log("MODE RÉGLAGE ACTIVÉ");
+
+    statusElement.textContent = "Réglage des couleurs";
+
+    messageElement.textContent =
+        "Mode réglage actif ! Pince avec l'autre main et déplace-la horizontalement.";
+}
+
+// ==========================================
+// DÉSACTIVATION DU MODE
+// ==========================================
+
+function deactivateAdjustmentMode() {
+    adjustmentMode = false;
+    controlHandedness = null;
+
+    isPinching = false;
+    previousPinchX = null;
+
+    openHandStart = null;
+
+    statusElement.textContent = "Scanner actif";
+
+    messageElement.textContent =
+        "Mode réglage terminé.";
+}
+
+// ==========================================
+// CONTRÔLE DE LA SENSIBILITÉ
+// ==========================================
+
+function updateSensitivityGesture(
+    frame,
+    viewerPose,
+    time
+) {
+    if (!enabledFeatures.includes("hand-tracking")) {
+        return;
+    }
+
+    const sources = Array.from(session.inputSources)
+        .filter(source => source.hand);
+
+    // ======================================
+    // ÉTAPE 1 : OUVRIR UNE MAIN 5 SECONDES
+    // ======================================
+
+    if (!adjustmentMode) {
+        let detectedHand = null;
+
+        for (const source of sources) {
+            if (isOpenHand(frame, source.hand)) {
+                detectedHand = source;
+                break;
+            }
+        }
+
+        if (!detectedHand) {
+            openHandStart = null;
+            return;
+        }
+
+        if (openHandStart === null) {
+            openHandStart = time;
+
+            messageElement.textContent =
+                "Garde ta main ouverte pendant 5 secondes...";
+        }
+
+        const elapsed = time - openHandStart;
+
+        const remaining = Math.max(
+            0,
+            Math.ceil((OPEN_HAND_HOLD_TIME - elapsed) / 1000)
+        );
+
+        if (remaining > 0) {
+            messageElement.textContent =
+                `Activation du réglage dans ${remaining} s...`;
+
+            return;
+        }
+
+        activateAdjustmentMode(
+            detectedHand.handedness
+        );
+
+        return;
+    }
+
+    // ======================================
+    // ÉTAPE 2 : UTILISER L'AUTRE MAIN
+    // ======================================
+
+    const otherHand = sources.find(
+        source =>
+            source.handedness !== controlHandedness
+    );
+
+    if (!otherHand) {
+        isPinching = false;
+        previousPinchX = null;
+
+        messageElement.textContent =
+            "Mode réglage actif. Utilise l'autre main pour pincer.";
+
+        return;
+    }
+
+    const pinchDistance = getPinchDistance(
+        frame,
+        otherHand.hand
+    );
+
+    const pinchCenter = getPinchCenter(
+        frame,
+        otherHand.hand
+    );
+
+    if (
+        pinchDistance === null ||
+        !pinchCenter
+    ) {
+        isPinching = false;
+        previousPinchX = null;
+        return;
+    }
+
+    // ======================================
+    // ÉTAPE 3 : DÉBUT DU PINCEMENT
+    // ======================================
+
+    if (!isPinching) {
+        if (pinchDistance < PINCH_START_DISTANCE) {
+            isPinching = true;
+
+            previousPinchX = getViewerLocalX(
+                pinchCenter,
+                viewerPose
+            );
+
+            messageElement.textContent =
+                "Pincement détecté ! Déplace ta main à gauche ou à droite.";
+        }
+
+        return;
+    }
+
+    // ======================================
+    // ÉTAPE 4 : FIN DU PINCEMENT
+    // ======================================
+
+    if (pinchDistance > PINCH_RELEASE_DISTANCE) {
+        isPinching = false;
+        previousPinchX = null;
+
+        messageElement.textContent =
+            `Réglage : ${maxDistance.toFixed(1)} m. Pince à nouveau pour continuer.`;
+
+        return;
+    }
+
+    // ======================================
+    // ÉTAPE 5 : DÉPLACEMENT HORIZONTAL
+    // ======================================
+
+    const currentX = getViewerLocalX(
+        pinchCenter,
+        viewerPose
+    );
+
+    if (previousPinchX === null) {
+        previousPinchX = currentX;
+        return;
+    }
+
+    const deltaX = currentX - previousPinchX;
+
+    previousPinchX = currentX;
+
+    // Droite = plus sensible.
+    // Gauche = moins sensible.
+
+    const newDistance =
+        maxDistance - deltaX * SENSITIVITY_SPEED;
+
+    setSensitivity(newDistance);
+}
+
+// ==========================================
+// GESTE ROCK POUR ROOM CAPTURE
+// ==========================================
 
 function detectRockGesture(frame) {
     if (!enabledFeatures.includes("hand-tracking")) {
         return false;
     }
 
-    const inputSources = session.inputSources;
-
-    for (const source of inputSources) {
+    for (const source of session.inputSources) {
         if (!source.hand) continue;
 
         const hand = source.hand;
@@ -251,44 +583,31 @@ function detectRockGesture(frame) {
 
         if (!wrist) continue;
 
-        const indexExtended = isFingerExtended(
-            frame,
-            hand,
-            wrist,
+        const index = isFingerExtended(
+            frame, hand, wrist,
             "index-finger-phalanx-proximal",
             "index-finger-tip"
         );
 
-        const middleCurled = isFingerCurled(
-            frame,
-            hand,
-            wrist,
+        const middle = isFingerCurled(
+            frame, hand, wrist,
             "middle-finger-phalanx-proximal",
             "middle-finger-tip"
         );
 
-        const ringCurled = isFingerCurled(
-            frame,
-            hand,
-            wrist,
+        const ring = isFingerCurled(
+            frame, hand, wrist,
             "ring-finger-phalanx-proximal",
             "ring-finger-tip"
         );
 
-        const pinkyExtended = isFingerExtended(
-            frame,
-            hand,
-            wrist,
+        const pinky = isFingerExtended(
+            frame, hand, wrist,
             "pinky-finger-phalanx-proximal",
             "pinky-finger-tip"
         );
 
-        if (
-            indexExtended &&
-            middleCurled &&
-            ringCurled &&
-            pinkyExtended
-        ) {
+        if (index && middle && ring && pinky) {
             return true;
         }
     }
@@ -296,11 +615,13 @@ function detectRockGesture(frame) {
     return false;
 }
 
-// ==========================================
-// GESTION DU GESTE ROCK
-// ==========================================
-
 function updateRockGesture(frame, time) {
+    if (adjustmentMode) {
+        rockStartTime = null;
+        rockDetected = false;
+        return;
+    }
+
     const detected = detectRockGesture(frame);
 
     if (!detected) {
@@ -313,35 +634,16 @@ function updateRockGesture(frame, time) {
         rockStartTime = time;
     }
 
-    const heldDuration = time - rockStartTime;
-
     if (
-        heldDuration >= ROCK_HOLD_TIME &&
+        time - rockStartTime >= ROCK_HOLD_TIME &&
         !rockDetected &&
         time - lastRockTime > ROCK_COOLDOWN
     ) {
         rockDetected = true;
         lastRockTime = time;
 
-        triggerRockAction();
-    }
-}
-
-function triggerRockAction() {
-    console.log("🤘 GESTE ROCK DÉTECTÉ");
-
-    if (!roomCaptureAttempted) {
         initiateRoomCapture();
-        return;
     }
-
-    roomCaptureStatus =
-        "Capture déjà demandée pendant cette session.";
-
-    messageElement.textContent =
-        "🤘 Geste détecté. La capture a déjà été demandée. Une nouvelle session sera nécessaire pour la relancer.";
-
-    console.info(roomCaptureStatus);
 }
 
 // ==========================================
@@ -598,7 +900,12 @@ function getWorldCenter(visual) {
 async function initiateRoomCapture() {
     if (!session || !isRunning) return;
 
-    if (roomCaptureAttempted) return;
+    if (roomCaptureAttempted) {
+        messageElement.textContent =
+            "Room Capture a déjà été demandée pendant cette session.";
+
+        return;
+    }
 
     roomCaptureAttempted = true;
 
@@ -607,9 +914,8 @@ async function initiateRoomCapture() {
             "API initiateRoomCapture indisponible.";
 
         messageElement.textContent =
-            "Room Capture n'est pas disponible dans cette session.";
+            "Room Capture indisponible dans cette session.";
 
-        console.warn(roomCaptureStatus);
         return;
     }
 
@@ -617,10 +923,6 @@ async function initiateRoomCapture() {
 
     messageElement.textContent =
         "🤘 Demande de capture envoyée à Meta Quest.";
-
-    console.info(
-        "Demande de Room Capture envoyée à Meta Quest."
-    );
 
     try {
         const result = session.initiateRoomCapture();
@@ -630,10 +932,10 @@ async function initiateRoomCapture() {
         }
 
         roomCaptureStatus =
-            "Demande envoyée. Termine la capture si une interface apparaît.";
+            "Demande envoyée.";
 
         messageElement.textContent =
-            "Capture demandée. Suis les instructions du Quest.";
+            "Termine la capture si une interface Meta apparaît.";
 
     } catch (error) {
         roomCaptureStatus =
@@ -661,6 +963,15 @@ async function enterAR() {
 
     latestPlaneCount = 0;
     latestMeshCount = 0;
+
+    maxDistance = DEFAULT_DISTANCE;
+
+    openHandStart = null;
+    adjustmentMode = false;
+    controlHandedness = null;
+
+    isPinching = false;
+    previousPinchX = null;
 
     rockStartTime = null;
     rockDetected = false;
@@ -753,7 +1064,7 @@ async function enterAR() {
 
         if (enabledFeatures.includes("hand-tracking")) {
             messageElement.textContent =
-                "Scanner actif. Fais le signe 🤘 et maintiens-le pour demander une capture.";
+                "Ouvre une main pendant 5 secondes pour régler les couleurs.";
         } else {
             messageElement.textContent =
                 "Hand Tracking indisponible. Vérifie les autorisations du Quest.";
@@ -811,7 +1122,11 @@ function renderFrame(time, frame) {
         viewerPose.transform.position.z
     );
 
-    // Détection du geste à chaque frame.
+    updateSensitivityGesture(
+        frame,
+        viewerPose,
+        time
+    );
 
     updateRockGesture(frame, time);
 
@@ -898,6 +1213,7 @@ function stopAR() {
         `Room Capture : ${roomCaptureStatus}\n` +
         `Plans conservés : ${planeVisuals.size}\n` +
         `Maillages conservés : ${meshVisuals.size}\n` +
+        `Portée des couleurs : ${maxDistance.toFixed(1)} m\n` +
         `Fonctionnalités : ${enabledFeatures.join(", ") || "non communiquées"}`;
 
     console.info("RAPPORT FINAL DU SCAN");
