@@ -1,0 +1,253 @@
+
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VISION OS</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#07111c;color:#e5f8ff;font-family:Arial,sans-serif}
+header{padding:20px;color:#55dfff;font-size:24px;font-weight:bold;letter-spacing:5px}
+main{padding:15px;max-width:1000px;margin:auto}
+.panel{background:#102333;border:1px solid #28516a;border-radius:15px;padding:15px;margin-bottom:15px}
+canvas{width:100%;background:#020609;border-radius:10px;display:block}
+button,.file{background:#12384c;color:white;border:1px solid #3b819e;border-radius:9px;padding:12px;margin:4px;cursor:pointer}
+button.active{background:#087b9c}
+input{accent-color:#43dfff}
+.row{display:flex;flex-wrap:wrap;align-items:center}
+h3{color:#68dfff;font-size:14px}
+small{color:#8ba9bb}
+#video{display:none}
+</style>
+</head>
+<body>
+<header>VISION OS</header>
+<main>
+<section class="panel">
+<h3>VISUAL DISPLAY</h3>
+<canvas id="screen" width="1280" height="720"></canvas>
+<div class="row">
+<input type="file" id="file" accept="image/*,video/*">
+</div>
+<div class="row">
+<button data-mode="normal" class="active">Normal</button>
+<button data-mode="gray">Noir et blanc</button>
+<button data-mode="mirrorX">Miroir horizontal</button>
+<button data-mode="mirrorY">Miroir vertical</button>
+<button data-mode="sound">Vision sonore</button>
+</div>
+<h3>ZOOM</h3>
+<input id="zoom" type="range" min="1" max="5" step=".1" value="1">
+<h3>POSITION</h3>
+<label>X <input id="x" type="range" min="-1" max="1" step=".01" value="0"></label>
+<label>Y <input id="y" type="range" min="-1" max="1" step=".01" value="0"></label>
+</section>
+
+<section class="panel">
+<h3>SON</h3>
+<button id="mic">Activer le microphone</button>
+<button id="stop">Arrêter</button>
+<p id="status">Microphone désactivé.</p>
+<canvas id="spectrum" width="600" height="150"></canvas>
+<h3>RÉALITÉ VIRTUELLE</h3>
+<button id="vr">Entrer en VR</button>
+<p id="vrstatus"></p>
+<small>
+Cette application applique les filtres à une image ou vidéo importée.
+Elle ne peut pas modifier directement le passthrough du Quest 3S.
+</small>
+</section>
+</main>
+
+<video id="video" playsinline loop muted></video>
+
+<script type="module">
+import * as THREE from
+'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+import {VRButton} from
+'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/webxr/VRButton.js';
+
+const canvas=document.getElementById('screen');
+const ctx=canvas.getContext('2d');
+const spectrum=document.getElementById('spectrum');
+const sctx=spectrum.getContext('2d');
+const video=document.getElementById('video');
+
+let source=null;
+let mode='normal';
+let zoom=1,px=0,py=0;
+let analyser=null,stream=null,audio=null;
+let data=null;
+
+document.getElementById('file').onchange=e=>{
+ const f=e.target.files[0];
+ if(!f)return;
+ const url=URL.createObjectURL(f);
+ if(f.type.startsWith('video')){
+  video.src=url;
+  video.onloadeddata=()=>{
+   source=video;
+   video.play();
+  };
+ }else{
+  const img=new Image();
+  img.onload=()=>source=img;
+  img.src=url;
+ }
+};
+
+document.querySelectorAll('[data-mode]').forEach(b=>{
+ b.onclick=()=>{
+  mode=b.dataset.mode;
+  document.querySelectorAll('[data-mode]').forEach(x=>
+   x.classList.toggle('active',x===b));
+ };
+});
+
+document.getElementById('zoom').oninput=e=>zoom=+e.target.value;
+document.getElementById('x').oninput=e=>px=+e.target.value;
+document.getElementById('y').oninput=e=>py=+e.target.value;
+
+function draw(){
+ const w=canvas.width,h=canvas.height;
+ ctx.clearRect(0,0,w,h);
+
+ if(mode==='sound'){
+  drawSound();
+  requestAnimationFrame(draw);
+  return;
+ }
+
+ if(!source){
+  ctx.fillStyle='#06131d';
+  ctx.fillRect(0,0,w,h);
+  ctx.fillStyle='#6bcde8';
+  ctx.font='30px Arial';
+  ctx.fillText('IMPORTER UNE IMAGE OU VIDEO',300,350);
+  requestAnimationFrame(draw);
+  return;
+ }
+
+ const sw=source.videoWidth||source.naturalWidth;
+ const sh=source.videoHeight||source.naturalHeight;
+ const scale=Math.max(w/sw,h/sh)*zoom;
+ const dw=sw*scale,dh=sh*scale;
+ const dx=(w-dw)/2+px*w*.35;
+ const dy=(h-dh)/2+py*h*.35;
+
+ ctx.save();
+ ctx.translate(w/2,h/2);
+ ctx.scale(mode==='mirrorX'?-1:1,mode==='mirrorY'?-1:1);
+ ctx.translate(-w/2,-h/2);
+ ctx.filter=mode==='gray'?'grayscale(1)':'none';
+ ctx.drawImage(source,dx,dy,dw,dh);
+ ctx.restore();
+ ctx.filter='none';
+
+ requestAnimationFrame(draw);
+}
+
+function drawSound(){
+ const w=canvas.width,h=canvas.height;
+ ctx.fillStyle='#020609';
+ ctx.fillRect(0,0,w,h);
+
+ if(!analyser){
+  ctx.fillStyle='white';
+  ctx.font='28px Arial';
+  ctx.fillText('ACTIVE LE MICROPHONE',400,360);
+  return;
+ }
+
+ analyser.getByteFrequencyData(data);
+ const bars=100;
+ for(let i=0;i<bars;i++){
+  const value=data[Math.floor(i/bars*data.length)]/255;
+  const hue=220-i/bars*220;
+  const brightness=8+value*75;
+  ctx.fillStyle=`hsl(${hue},100%,${brightness}%)`;
+  ctx.fillRect(i*w/bars,0,w/bars+1,h);
+ }
+}
+
+async function startMic(){
+ try{
+  stream=await navigator.mediaDevices.getUserMedia({audio:true});
+  audio=new AudioContext();
+  analyser=audio.createAnalyser();
+  analyser.fftSize=2048;
+  audio.createMediaStreamSource(stream).connect(analyser);
+  data=new Uint8Array(analyser.frequencyBinCount);
+  document.getElementById('status').textContent='Microphone actif';
+ }catch(e){
+  document.getElementById('status').textContent=e.message;
+ }
+}
+
+document.getElementById('mic').onclick=startMic;
+document.getElementById('stop').onclick=()=>{
+ if(stream)stream.getTracks().forEach(t=>t.stop());
+ if(audio)audio.close();
+ stream=null;audio=null;analyser=null;
+ document.getElementById('status').textContent='Microphone désactivé';
+};
+
+draw();
+
+/* SCENE VR */
+
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x020912);
+
+const camera=new THREE.PerspectiveCamera(
+ 70,innerWidth/innerHeight,.01,100
+);
+
+const renderer=new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth,innerHeight);
+renderer.xr.enabled=true;
+renderer.domElement.style.position='fixed';
+renderer.domElement.style.inset='0';
+renderer.domElement.style.zIndex='-1';
+document.body.appendChild(renderer.domElement);
+
+const texture=new THREE.CanvasTexture(canvas);
+const screen=new THREE.Mesh(
+ new THREE.PlaneGeometry(2.4,1.35),
+ new THREE.MeshBasicMaterial({map:texture,side:THREE.DoubleSide})
+);
+screen.position.set(0,1.6,-2);
+scene.add(screen);
+
+const grid=new THREE.GridHelper(20,20,0x15516a,0x102b3a);
+scene.add(grid);
+
+renderer.setAnimationLoop(()=>{
+ texture.needsUpdate=true;
+ renderer.render(scene,camera);
+});
+
+window.onresize=()=>{
+ camera.aspect=innerWidth/innerHeight;
+ camera.updateProjectionMatrix();
+ renderer.setSize(innerWidth,innerHeight);
+};
+
+const vrButton=VRButton.createButton(renderer);
+vrButton.style.display='none';
+document.body.appendChild(vrButton);
+
+document.getElementById('vr').onclick=async()=>{
+ try{
+  const supported=await navigator.xr.isSessionSupported('immersive-vr');
+  if(supported)vrButton.click();
+  else document.getElementById('vrstatus').textContent=
+   'VR non supportée par ce navigateur';
+ }catch(e){
+  document.getElementById('vrstatus').textContent=e.message;
+ }
+};
+</script>
+</body>
+</html>
