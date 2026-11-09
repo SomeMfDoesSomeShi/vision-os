@@ -5,17 +5,15 @@ import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.m
 // CONFIGURATION
 // ======================================================
 
-const MIN_DISTANCE = 2;
-const MAX_DISTANCE = 12;
-const DEFAULT_DISTANCE = 6;
-
 const MENU_INTERACTION_DELAY = 5000;
+
 const PINCH_START_DISTANCE = 0.032;
 const PINCH_RELEASE_DISTANCE = 0.055;
+
 const SMOOTHING = 0.32;
 
 const MENU_WIDTH = 0.62;
-const MENU_HEIGHT = 0.66;
+const MENU_HEIGHT = 0.42;
 
 const $ = id => document.getElementById(id);
 
@@ -38,14 +36,12 @@ let referenceSpace = null;
 let isRunning = false;
 let enabledFeatures = [];
 
-let maxDistance = DEFAULT_DISTANCE;
-
-let cameraPassthrough = true;
 let armScanEnabled = true;
-let distanceScanEnabled = true;
 
 let menuOpen = false;
 let menuInteractionUnlockTime = 0;
+
+let leftRockWasActive = false;
 
 let pinchWasActive = false;
 let pinchActive = false;
@@ -53,6 +49,7 @@ let activeTouch = null;
 
 let menuGroup = null;
 let menuButtons = [];
+let closeButton = null;
 
 let pointerLine = null;
 let pointerDot = null;
@@ -68,85 +65,34 @@ const meshVisuals = new Map();
 const armVisuals = new Map();
 
 // ======================================================
-// DISTANCE SHADER
+// MATÉRIAUX
 // ======================================================
 
-const vertexShader = `
-    varying vec3 vWorldPosition;
+// Plus aucun shader de profondeur.
+// Les surfaces du scan sont simplement affichées en filaire.
 
-    void main() {
-        vec4 worldPosition =
-            modelMatrix * vec4(position, 1.0);
-
-        vWorldPosition = worldPosition.xyz;
-
-        gl_Position =
-            projectionMatrix *
-            viewMatrix *
-            worldPosition;
-    }
-`;
-
-const fragmentShader = `
-    uniform float uMaxDistance;
-
-    varying vec3 vWorldPosition;
-
-    void main() {
-        float d = distance(
-            cameraPosition,
-            vWorldPosition
-        );
-
-        float brightness = clamp(
-            1.0 - d / uMaxDistance,
-            0.0,
-            1.0
-        );
-
-        gl_FragColor = vec4(
-            vec3(brightness),
-            1.0
-        );
-    }
-`;
-
-function createDepthMaterial() {
-    return new THREE.ShaderMaterial({
-        uniforms: {
-            uMaxDistance: {
-                value: maxDistance
-            }
-        },
-        vertexShader,
-        fragmentShader,
+function createScanMaterial() {
+    return new THREE.MeshBasicMaterial({
+        color: 0x5cf0c0,
+        transparent: true,
+        opacity: 0.65,
         side: THREE.DoubleSide,
+        wireframe: true,
+        depthWrite: false,
         depthTest: true,
-        depthWrite: true,
         toneMapped: false
     });
 }
 
-function setSensitivity(value) {
-    maxDistance = THREE.MathUtils.clamp(
-        value,
-        MIN_DISTANCE,
-        MAX_DISTANCE
-    );
-
-    scene?.traverse(object => {
-        const material = object.material;
-
-        if (material?.uniforms?.uMaxDistance) {
-            material.uniforms.uMaxDistance.value =
-                maxDistance;
-        }
+function createHandMaterial() {
+    return new THREE.MeshBasicMaterial({
+        color: 0x75cfff,
+        transparent: true,
+        opacity: 0.9,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        toneMapped: false
     });
-
-    updateMenu();
-
-    messageElement.textContent =
-        `Portée du scan : ${maxDistance.toFixed(1)} m`;
 }
 
 // ======================================================
@@ -245,7 +191,7 @@ function detectLeftRock(frame) {
 }
 
 // ======================================================
-// MENU GRAPHIQUE
+// TEXTURES DU MENU
 // ======================================================
 
 function createTextTexture(title, subtitle = "", selected = false) {
@@ -273,28 +219,39 @@ function createTextTexture(title, subtitle = "", selected = false) {
     ctx.fillText(subtitle, 30, 125);
 
     const texture = new THREE.CanvasTexture(canvas);
+
     texture.colorSpace = THREE.SRGBColorSpace;
 
     return texture;
 }
 
-function createMenuButton(label, subtitle, action, y) {
+// ======================================================
+// CRÉATION DES BOUTONS
+// ======================================================
+
+function createMenuButton(label, subtitle, action, x, y, width = 0.53, height = 0.085) {
     const material = new THREE.MeshBasicMaterial({
         map: createTextTexture(label, subtitle),
-        side: THREE.DoubleSide
+        side: THREE.DoubleSide,
+        depthTest: false,
+        depthWrite: false
     });
 
     const button = new THREE.Mesh(
-        new THREE.PlaneGeometry(0.53, 0.085),
+        new THREE.PlaneGeometry(width, height),
         material
     );
 
-    button.position.set(0, y, 0.014);
+    button.position.set(x, y, 0.015);
+
+    button.renderOrder = 10;
 
     button.userData.action = action;
     button.userData.defaultTitle = label;
     button.userData.subtitle = subtitle;
     button.userData.selected = false;
+    button.userData.width = width;
+    button.userData.height = height;
 
     menuGroup.add(button);
     menuButtons.push(button);
@@ -302,100 +259,63 @@ function createMenuButton(label, subtitle, action, y) {
     return button;
 }
 
+// ======================================================
+// CRÉATION DE LA FENÊTRE
+// ======================================================
+
 function createMenu() {
     if (menuGroup) return;
 
     menuGroup = new THREE.Group();
 
-    const background = new THREE.Mesh(
-        new THREE.PlaneGeometry(
-            MENU_WIDTH,
-            MENU_HEIGHT
-        ),
-        new THREE.MeshBasicMaterial({
-            color: 0x071321,
-            transparent: true,
-            opacity: 0.96,
-            side: THREE.DoubleSide
-        })
-    );
-
-    menuGroup.add(background);
+    // Aucun grand panneau noir derrière les boutons.
+    // Chaque élément possède son propre fond.
 
     const title = new THREE.Mesh(
         new THREE.PlaneGeometry(0.53, 0.09),
         new THREE.MeshBasicMaterial({
             map: createTextTexture(
                 "QUEST SCANNER",
-                "Controle gestuel"
+                "Menu spatial"
             ),
-            side: THREE.DoubleSide
+            side: THREE.DoubleSide,
+            depthTest: false,
+            depthWrite: false
         })
     );
 
-    title.position.set(0, 0.27, 0.014);
+    title.position.set(-0.025, 0.15, 0.015);
+    title.renderOrder = 10;
+
     menuGroup.add(title);
 
-    createMenuButton(
-        "SENSIBILITE",
-        "Regler la portee du scan",
-        "sensitivity",
-        0.16
+    // Bouton de fermeture en haut à droite.
+
+    closeButton = createMenuButton(
+        "X",
+        "FERMER",
+        "close",
+        0.255,
+        0.15,
+        0.075,
+        0.075
     );
 
     createMenuButton(
         "ACTUALISER LE SCAN",
-        "Demander une capture Meta",
+        "Demander une nouvelle capture Meta",
         "rescan",
-        0.055
-    );
-
-    createMenuButton(
-        "CAMERA TRANSPARENTE",
-        "Modifier le fond du rendu",
-        "camera",
-        -0.05
+        0,
+        0.015
     );
 
     createMenuButton(
         "MAINS / BRAS",
-        "Afficher ou masquer l'estimation",
+        "Afficher ou masquer leur estimation",
         "arms",
-        -0.155
+        0,
+        -0.105
     );
-
-    createMenuButton(
-        "SCAN DES DISTANCES",
-        "Afficher ou masquer le scan",
-        "distance",
-        -0.26
-    );
-
-    const sliderBackground = new THREE.Mesh(
-        new THREE.PlaneGeometry(0.47, 0.018),
-        new THREE.MeshBasicMaterial({
-            color: 0x30465d,
-            side: THREE.DoubleSide
-        })
-    );
-
-    sliderBackground.position.set(0, 0.105, 0.025);
-    menuGroup.add(sliderBackground);
-
-    const sliderFill = new THREE.Mesh(
-        new THREE.PlaneGeometry(1, 0.018),
-        new THREE.MeshBasicMaterial({
-            color: 0x5cf0c0,
-            side: THREE.DoubleSide
-        })
-    );
-
-    sliderFill.position.set(-0.235, 0.105, 0.03);
-    sliderFill.scale.x = 0.01;
-
-    menuGroup.add(sliderFill);
-
-    menuGroup.userData.sliderFill = sliderFill;
 
     scene.add(menuGroup);
 
@@ -417,27 +337,19 @@ function updateButtonAppearance(button, selected) {
         button.material.map.dispose();
     }
 
-    const action = button.userData.action;
+    let title = button.userData.defaultTitle;
 
-    const titles = {
-        camera: cameraPassthrough
-            ? "CAMERA : ON"
-            : "CAMERA : OFF",
-
-        arms: armScanEnabled
+    if (button.userData.action === "arms") {
+        title = armScanEnabled
             ? "MAINS / BRAS : ON"
-            : "MAINS / BRAS : OFF",
-
-        distance: distanceScanEnabled
-            ? "DISTANCES : ON"
-            : "DISTANCES : OFF",
-
-        sensitivity: `SENSIBILITE : ${maxDistance.toFixed(1)} m`
-    };
+            : "MAINS / BRAS : OFF";
+    }
 
     button.material.map = createTextTexture(
-        titles[action] || button.userData.defaultTitle,
-        selected ? "Pince pour selectionner" : button.userData.subtitle,
+        title,
+        selected
+            ? "Pince pour selectionner"
+            : button.userData.subtitle,
         selected
     );
 
@@ -445,42 +357,20 @@ function updateButtonAppearance(button, selected) {
 }
 
 function updateMenu() {
-    if (!menuGroup) return;
-
-    const slider = menuGroup.userData.sliderFill;
-
-    if (slider) {
-        const ratio =
-            (maxDistance - MIN_DISTANCE) /
-            (MAX_DISTANCE - MIN_DISTANCE);
-
-        slider.scale.x = Math.max(0.01, ratio);
-        slider.position.x = -0.235 + ratio * 0.235;
-    }
-
     for (const button of menuButtons) {
         updateButtonAppearance(button, false);
     }
 }
 
 // ======================================================
-// POSITION DU MENU AU-DESSUS DU POIGNET GAUCHE
+// POSITION INITIALE DE LA FENÊTRE
 // ======================================================
 
-function updateMenuPosition(frame, viewerPose) {
+// La fenêtre est placée une seule fois.
+// Elle ne suit plus le poignet ou la tête.
+
+function placeMenuAtOpening(viewerPose) {
     if (!menuGroup) return;
-
-    const leftHand = getHand(frame, "left");
-
-    if (!leftHand) return;
-
-    const wrist = getJointPosition(
-        frame,
-        leftHand.hand,
-        "wrist"
-    );
-
-    if (!wrist) return;
 
     const orientation = viewerPose.transform.orientation;
 
@@ -491,30 +381,72 @@ function updateMenuPosition(frame, viewerPose) {
         orientation.w
     );
 
-    const up = new THREE.Vector3(0, 1, 0);
+    const viewerPosition = new THREE.Vector3(
+        viewerPose.transform.position.x,
+        viewerPose.transform.position.y,
+        viewerPose.transform.position.z
+    );
+
     const forward = new THREE.Vector3(0, 0, -1);
+    const up = new THREE.Vector3(0, 1, 0);
 
-    up.applyQuaternion(headQuaternion);
     forward.applyQuaternion(headQuaternion);
+    up.applyQuaternion(headQuaternion);
 
-    // Position directement calculée depuis le poignet.
-    const targetPosition = wrist.clone()
-        .addScaledVector(up, 0.30)
-        .addScaledVector(forward, 0.08);
+    const targetPosition = viewerPosition.clone()
+        .addScaledVector(forward, 0.85)
+        .addScaledVector(up, -0.08);
 
-    menuGroup.position.lerp(
-        targetPosition,
-        0.28
-    );
-
-    menuGroup.quaternion.slerp(
-        headQuaternion,
-        0.25
-    );
+    // Position et orientation fixes dans l'espace.
+    menuGroup.position.copy(targetPosition);
+    menuGroup.quaternion.copy(headQuaternion);
 
     menuGroup.visible = true;
 
     menuGroup.updateMatrixWorld(true);
+}
+
+// ======================================================
+// OUVERTURE ET FERMETURE
+// ======================================================
+
+function openMenu(frame, viewerPose, time) {
+    if (menuOpen) return;
+
+    if (!menuGroup) {
+        createMenu();
+    }
+
+    menuOpen = true;
+
+    placeMenuAtOpening(viewerPose);
+
+    menuInteractionUnlockTime =
+        time + MENU_INTERACTION_DELAY;
+
+    pinchWasActive = false;
+    pinchActive = false;
+    activeTouch = null;
+
+    messageElement.textContent =
+        "Fenêtre ouverte. Attends 5 secondes avant de pincer.";
+}
+
+function closeMenuImmediately() {
+    menuOpen = false;
+
+    if (menuGroup) {
+        menuGroup.visible = false;
+    }
+
+    pinchWasActive = false;
+    pinchActive = false;
+    activeTouch = null;
+
+    hidePointer();
+
+    messageElement.textContent =
+        "Fenêtre fermée. Fais le geste Rock pour la rouvrir.";
 }
 
 // ======================================================
@@ -534,21 +466,26 @@ function createPointer() {
         new THREE.LineBasicMaterial({
             color: 0x5cf0c0,
             transparent: true,
-            opacity: 0.9
+            opacity: 0.95,
+            depthTest: false
         })
     );
 
     pointerLine.frustumCulled = false;
+    pointerLine.renderOrder = 20;
 
     pointerDot = new THREE.Mesh(
         new THREE.SphereGeometry(0.009, 12, 12),
         new THREE.MeshBasicMaterial({
-            color: 0x5cf0c0
+            color: 0x5cf0c0,
+            depthTest: false
         })
     );
 
     pointerLine.visible = false;
     pointerDot.visible = false;
+
+    pointerDot.renderOrder = 21;
 
     scene.add(pointerLine);
     scene.add(pointerDot);
@@ -649,12 +586,20 @@ function updatePointer(frame) {
         } else {
             pointerHit = null;
             pointerLocalHit = null;
-            end = origin.clone().addScaledVector(direction, 0.7);
+
+            end = origin.clone().addScaledVector(
+                direction,
+                0.7
+            );
         }
     } else {
         pointerHit = null;
         pointerLocalHit = null;
-        end = origin.clone().addScaledVector(direction, 0.7);
+
+        end = origin.clone().addScaledVector(
+            direction,
+            0.7
+        );
     }
 
     pointerLine.geometry.setFromPoints([
@@ -701,7 +646,10 @@ function isPinching(frame, source) {
 
     if (distance === null) return false;
 
-    if (!pinchActive && distance < PINCH_START_DISTANCE) {
+    if (
+        !pinchActive &&
+        distance < PINCH_START_DISTANCE
+    ) {
         pinchActive = true;
     } else if (
         pinchActive &&
@@ -713,15 +661,22 @@ function isPinching(frame, source) {
     return pinchActive;
 }
 
+// ======================================================
+// DÉTECTION DES BOUTONS
+// ======================================================
+
 function getButtonAtPoint(local) {
     if (!local) return null;
 
     for (const button of menuButtons) {
         const p = button.position;
 
+        const halfWidth = button.userData.width / 2;
+        const halfHeight = button.userData.height / 2;
+
         if (
-            Math.abs(local.x - p.x) < 0.265 &&
-            Math.abs(local.y - p.y) < 0.043
+            Math.abs(local.x - p.x) <= halfWidth &&
+            Math.abs(local.y - p.y) <= halfHeight
         ) {
             return button;
         }
@@ -729,6 +684,10 @@ function getButtonAtPoint(local) {
 
     return null;
 }
+
+// ======================================================
+// INTERACTION DU MENU
+// ======================================================
 
 function updateMenuTouch(frame, time) {
     if (!menuOpen || !menuGroup?.visible) return;
@@ -744,12 +703,6 @@ function updateMenuTouch(frame, time) {
 
     const pinching = isPinching(frame, rightHand);
 
-    if (time < menuInteractionUnlockTime) {
-        pinchWasActive = pinching;
-        activeTouch = null;
-        return;
-    }
-
     const local = pointerLocalHit;
     const hoveredButton = getButtonAtPoint(local);
 
@@ -760,50 +713,19 @@ function updateMenuTouch(frame, time) {
         );
     }
 
-    const justPinched = pinching && !pinchWasActive;
-
-    if (justPinched && pointerHit && local) {
-        if (
-            local.y > 0.09 &&
-            local.y < 0.12 &&
-            Math.abs(local.x) < 0.25
-        ) {
-            const ratio = THREE.MathUtils.clamp(
-                (local.x + 0.235) / 0.47,
-                0,
-                1
-            );
-
-            setSensitivity(
-                MIN_DISTANCE +
-                ratio * (MAX_DISTANCE - MIN_DISTANCE)
-            );
-
-            activeTouch = "sensitivity";
-        } else if (hoveredButton) {
-            activeTouch = hoveredButton.userData.action;
-            activateMenuAction(activeTouch);
-        }
+    // Sécurité de 5 secondes après ouverture.
+    if (time < menuInteractionUnlockTime) {
+        pinchWasActive = pinching;
+        activeTouch = null;
+        return;
     }
 
-    if (
-        pinching &&
-        activeTouch === "sensitivity" &&
-        pointerHit &&
-        local &&
-        local.y > 0.07 &&
-        local.y < 0.14
-    ) {
-        const ratio = THREE.MathUtils.clamp(
-            (local.x + 0.235) / 0.47,
-            0,
-            1
-        );
+    const justPinched = pinching && !pinchWasActive;
 
-        setSensitivity(
-            MIN_DISTANCE +
-            ratio * (MAX_DISTANCE - MIN_DISTANCE)
-        );
+    if (justPinched && pointerHit && hoveredButton) {
+        activeTouch = hoveredButton.userData.action;
+
+        activateMenuAction(activeTouch);
     }
 
     if (!pinching) {
@@ -819,129 +741,59 @@ function updateMenuTouch(frame, time) {
 
 function activateMenuAction(action) {
     switch (action) {
+        case "close":
+            closeMenuImmediately();
+            break;
+
         case "rescan":
             initiateRoomCapture();
             break;
 
-        case "camera":
-            cameraPassthrough = !cameraPassthrough;
-
-            if (renderer) {
-                renderer.setClearColor(
-                    0x000000,
-                    cameraPassthrough ? 0 : 1
-                );
-
-                renderer.setClearAlpha(
-                    cameraPassthrough ? 0 : 1
-                );
-            }
-
-            updateMenu();
-
-            messageElement.textContent =
-                cameraPassthrough
-                    ? "Fond transparent demande."
-                    : "Fond opaque demande.";
-
-            break;
-
         case "arms":
             armScanEnabled = !armScanEnabled;
+
             updateMenu();
 
             messageElement.textContent =
                 armScanEnabled
-                    ? "Estimation des mains active."
-                    : "Estimation des mains masquee.";
-
-            break;
-
-        case "distance":
-            distanceScanEnabled = !distanceScanEnabled;
-            updateMenu();
-            updateScanVisibility();
-
-            messageElement.textContent =
-                distanceScanEnabled
-                    ? "Scan des distances active."
-                    : "Scan des distances masque.";
+                    ? "Estimation des mains et des bras active."
+                    : "Estimation des mains et des bras masquee.";
 
             break;
     }
 }
 
 // ======================================================
-// GESTION DU MENU : VISIBLE UNIQUEMENT PENDANT ROCK
+// GESTE ROCK : OUVERTURE UNIQUE
 // ======================================================
-
-function closeMenuImmediately() {
-    menuOpen = false;
-
-    if (menuGroup) {
-        menuGroup.visible = false;
-    }
-
-    pinchWasActive = false;
-    pinchActive = false;
-    activeTouch = null;
-
-    hidePointer();
-}
 
 function updateMenuState(frame, viewerPose, time) {
     const rock = detectLeftRock(frame);
 
-    // IMPORTANT :
-    // Le menu suit directement l'état du geste.
-    // Il n'y a plus de bascule ouverte/fermée.
-    if (!rock) {
-        if (menuOpen) {
-            closeMenuImmediately();
-        }
-
-        return;
+    // Uniquement au moment où le geste commence.
+    if (rock && !leftRockWasActive && !menuOpen) {
+        openMenu(
+            frame,
+            viewerPose,
+            time
+        );
     }
 
-    // Le menu est créé uniquement à la première détection.
-    if (!menuOpen) {
-        menuOpen = true;
+    leftRockWasActive = rock;
 
-        if (!menuGroup) {
-            createMenu();
-        }
-
-        menuGroup.visible = true;
-
-        menuInteractionUnlockTime =
-            time + MENU_INTERACTION_DELAY;
-
-        pinchWasActive = false;
-        pinchActive = false;
-        activeTouch = null;
-
-        messageElement.textContent =
-            "Menu ouvert. Attends 5 secondes avant de pincer.";
-    }
-
-    // Le menu est repositionné à chaque frame sur le poignet.
-    updateMenuPosition(
-        frame,
-        viewerPose
-    );
-
+    // La position de la fenêtre n'est jamais recalculée ici.
     updatePointer(frame);
     updateMenuTouch(frame, time);
 }
 
 // ======================================================
-// SEGMENTS ARRONDIS ET LISSES
+// SEGMENTS ARRONDIS
 // ======================================================
 
 function createSegment(radius = 0.014) {
     const group = new THREE.Group();
 
-    const material = createDepthMaterial();
+    const material = createHandMaterial();
 
     const cylinder = new THREE.Mesh(
         new THREE.CylinderGeometry(
@@ -1037,7 +889,7 @@ function updateSegment(mesh, start, end) {
 function createJointSphere(radius = 0.014) {
     const mesh = new THREE.Mesh(
         new THREE.SphereGeometry(radius, 16, 12),
-        createDepthMaterial()
+        createHandMaterial()
     );
 
     mesh.userData.initialized = false;
@@ -1062,7 +914,7 @@ function updateJoint(mesh, position) {
 }
 
 // ======================================================
-// MAINS ET BRAS
+// CHAÎNES DES DOIGTS
 // ======================================================
 
 const fingerChains = [
@@ -1102,16 +954,18 @@ const fingerChains = [
     ]
 ];
 
+// ======================================================
+// MAINS ET BRAS
+// ======================================================
+
 function createHandVisual() {
     return {
-        arm: createSegment(0.025),
-        elbow: createJointSphere(0.027),
-        wrist: createJointSphere(0.025),
+        // Deux segments au lieu d'un seul avant-bras.
+        upperArm: createSegment(0.032),
+        forearm: createSegment(0.028),
 
-        palm: new THREE.Mesh(
-            new THREE.SphereGeometry(1, 20, 16),
-            createDepthMaterial()
-        ),
+        // Pas de boule au poignet.
+        elbow: createJointSphere(0.023),
 
         fingerSegments: [],
         fingerJoints: []
@@ -1127,9 +981,10 @@ function ensureFingerVisuals(visual) {
         const segments = [];
         const joints = [];
 
-        for (let j = 1; j < chain.length; j++) {
-            const radius = f === 0 ? 0.008 : 0.007;
+        // Doigts plus épais.
+        const radius = f === 0 ? 0.014 : 0.012;
 
+        for (let j = 1; j < chain.length; j++) {
             segments.push(createSegment(radius));
             joints.push(createJointSphere(radius));
         }
@@ -1137,19 +992,9 @@ function ensureFingerVisuals(visual) {
         visual.fingerSegments.push(segments);
         visual.fingerJoints.push(joints);
     }
-
-    scene.add(visual.palm);
-
-    visual.palm.scale.set(
-        0.055,
-        0.075,
-        0.025
-    );
-
-    visual.palm.userData.initialized = false;
 }
 
-function updateHandArm(source, frame, viewerPosition) {
+function updateHandArm(source, frame, viewerPosition, viewerQuaternion) {
     if (!source.hand) return;
 
     const key = source.handedness;
@@ -1172,55 +1017,50 @@ function updateHandArm(source, frame, viewerPosition) {
     );
 
     if (!wrist) {
-        visual.arm.visible = false;
+        hideHandVisual(visual);
         return;
     }
 
-    const shoulder = viewerPosition.clone();
-
-    shoulder.x += key === "left" ? -0.19 : 0.19;
-    shoulder.y -= 0.24;
-    shoulder.z -= 0.06;
-
-    const elbow = shoulder.clone().lerp(wrist, 0.53);
-
-    elbow.y -= 0.035;
-    elbow.x += key === "left" ? -0.035 : 0.035;
-
-    updateSegment(visual.arm, elbow, wrist);
-
-    updateJoint(visual.elbow, elbow);
-    updateJoint(visual.wrist, wrist);
-
-    const palmCenter = getJointPosition(
-        frame,
-        hand,
-        "middle-finger-metacarpal"
+    // Estimation de la position de l'épaule.
+    // Elle est calculée dans l'orientation de la tête.
+    const shoulderOffset = new THREE.Vector3(
+        key === "left" ? -0.20 : 0.20,
+        -0.22,
+        0.025
     );
 
-    if (palmCenter) {
-        const targetPalm = wrist.clone()
-            .lerp(palmCenter, 0.5);
+    shoulderOffset.applyQuaternion(viewerQuaternion);
 
-        if (!visual.palm.userData.initialized) {
-            visual.palm.position.copy(targetPalm);
-            visual.palm.userData.initialized = true;
-        } else {
-            visual.palm.position.lerp(
-                targetPalm,
-                SMOOTHING
-            );
-        }
+    const shoulder = viewerPosition.clone()
+        .add(shoulderOffset);
 
-        visual.palm.visible = armScanEnabled;
-    }
+    // Coude intermédiaire.
+    const elbow = shoulder.clone().lerp(wrist, 0.52);
 
     const show = armScanEnabled;
 
-    visual.arm.visible = show;
-    visual.elbow.visible = show;
-    visual.wrist.visible = show;
+    updateSegment(
+        visual.upperArm,
+        shoulder,
+        elbow
+    );
 
+    updateSegment(
+        visual.forearm,
+        elbow,
+        wrist
+    );
+
+    updateJoint(
+        visual.elbow,
+        elbow
+    );
+
+    visual.upperArm.visible = show;
+    visual.forearm.visible = show;
+    visual.elbow.visible = show;
+
+    // Doigts.
     for (let f = 0; f < fingerChains.length; f++) {
         const chain = fingerChains[f];
 
@@ -1255,10 +1095,9 @@ function updateHandArm(source, frame, viewerPosition) {
 }
 
 function hideHandVisual(visual) {
-    visual.arm.visible = false;
+    visual.upperArm.visible = false;
+    visual.forearm.visible = false;
     visual.elbow.visible = false;
-    visual.wrist.visible = false;
-    visual.palm.visible = false;
 
     visual.fingerSegments.flat().forEach(mesh => {
         mesh.visible = false;
@@ -1269,7 +1108,7 @@ function hideHandVisual(visual) {
     });
 }
 
-function updateArms(frame, viewerPosition) {
+function updateArms(frame, viewerPosition, viewerQuaternion) {
     if (!enabledFeatures.includes("hand-tracking")) return;
 
     const seen = new Set();
@@ -1282,7 +1121,8 @@ function updateArms(frame, viewerPosition) {
         updateHandArm(
             source,
             frame,
-            viewerPosition
+            viewerPosition,
+            viewerQuaternion
         );
     }
 
@@ -1339,7 +1179,7 @@ function createPlaneVisual(plane) {
 
     const mesh = new THREE.Mesh(
         createPlaneGeometry(plane.polygon),
-        createDepthMaterial()
+        createScanMaterial()
     );
 
     group.add(mesh);
@@ -1386,7 +1226,6 @@ function updatePlane(plane, frame) {
 
     visual.group.matrix.fromArray(pose.transform.matrix);
     visual.group.matrixWorldNeedsUpdate = true;
-    visual.group.visible = distanceScanEnabled;
 
     return getWorldCenter(visual);
 }
@@ -1400,7 +1239,7 @@ function createMeshVisual() {
 
     const mesh = new THREE.Mesh(
         new THREE.BufferGeometry(),
-        createDepthMaterial()
+        createScanMaterial()
     );
 
     group.add(mesh);
@@ -1489,10 +1328,13 @@ function updateDetectedMesh(xrMesh, frame) {
 
     visual.group.matrix.fromArray(pose.transform.matrix);
     visual.group.matrixWorldNeedsUpdate = true;
-    visual.group.visible = distanceScanEnabled;
 
     return getWorldCenter(visual);
 }
+
+// ======================================================
+// CENTRE DU SCAN
+// ======================================================
 
 function getWorldCenter(visual) {
     const sphere = visual.mesh.geometry.boundingSphere;
@@ -1502,20 +1344,6 @@ function getWorldCenter(visual) {
     return sphere.center.clone().applyMatrix4(
         visual.group.matrix
     );
-}
-
-// ======================================================
-// VISIBILITÉ DU SCAN
-// ======================================================
-
-function updateScanVisibility() {
-    for (const visual of planeVisuals.values()) {
-        visual.group.visible = distanceScanEnabled;
-    }
-
-    for (const visual of meshVisuals.values()) {
-        visual.group.visible = distanceScanEnabled;
-    }
 }
 
 // ======================================================
@@ -1585,6 +1413,15 @@ function renderFrame(time, frame) {
         viewerPose.transform.position.z
     );
 
+    const orientation = viewerPose.transform.orientation;
+
+    const viewerQuaternion = new THREE.Quaternion(
+        orientation.x,
+        orientation.y,
+        orientation.z,
+        orientation.w
+    );
+
     updateMenuState(
         frame,
         viewerPose,
@@ -1593,7 +1430,8 @@ function renderFrame(time, frame) {
 
     updateArms(
         frame,
-        viewerPosition
+        viewerPosition,
+        viewerQuaternion
     );
 
     const planes = frame.detectedPlanes
@@ -1609,7 +1447,7 @@ function renderFrame(time, frame) {
     for (const plane of planes) {
         const center = updatePlane(plane, frame);
 
-        if (center && distanceScanEnabled) {
+        if (center) {
             nearestDistance = Math.min(
                 nearestDistance,
                 viewerPosition.distanceTo(center)
@@ -1620,7 +1458,7 @@ function renderFrame(time, frame) {
     for (const xrMesh of meshes) {
         const center = updateDetectedMesh(xrMesh, frame);
 
-        if (center && distanceScanEnabled) {
+        if (center) {
             nearestDistance = Math.min(
                 nearestDistance,
                 viewerPosition.distanceTo(center)
@@ -1632,7 +1470,7 @@ function renderFrame(time, frame) {
         planeVisuals.size + meshVisuals.size;
 
     nearestDistanceElement.textContent =
-        distanceScanEnabled && Number.isFinite(nearestDistance)
+        Number.isFinite(nearestDistance)
             ? nearestDistance.toFixed(2)
             : "—";
 
@@ -1672,6 +1510,7 @@ function disposeScene() {
 
     menuButtons = [];
     menuGroup = null;
+    closeButton = null;
 
     pointerLine = null;
     pointerDot = null;
@@ -1691,7 +1530,6 @@ function stopAR() {
         `Room Capture : ${roomCaptureStatus}\n` +
         `Plans : ${planeVisuals.size}\n` +
         `Maillages : ${meshVisuals.size}\n` +
-        `Portée : ${maxDistance.toFixed(1)} m\n` +
         `Fonctionnalités : ${enabledFeatures.join(", ") || "non communiquées"}`;
 
     console.info("RAPPORT FINAL DU SCAN\n" + report);
@@ -1713,6 +1551,8 @@ function stopAR() {
     referenceSpace = null;
 
     menuOpen = false;
+    leftRockWasActive = false;
+
     pinchWasActive = false;
     pinchActive = false;
     activeTouch = null;
@@ -1741,9 +1581,9 @@ async function enterAR() {
     roomCaptureAttempted = false;
     roomCaptureStatus = "En attente";
 
-    maxDistance = DEFAULT_DISTANCE;
-
     menuOpen = false;
+    leftRockWasActive = false;
+
     pinchWasActive = false;
     pinchActive = false;
     activeTouch = null;
@@ -1798,7 +1638,10 @@ async function enterAR() {
             renderer.domElement.style.zIndex = "9999";
 
             document.body.appendChild(renderer.domElement);
+        }
 
+        // La scène doit être recréée après chaque arrêt.
+        if (!scene) {
             scene = new THREE.Scene();
             scene.background = null;
 
@@ -1812,14 +1655,9 @@ async function enterAR() {
 
         renderer.xr.setReferenceSpaceType(referenceType);
 
-        renderer.setClearColor(
-            0x000000,
-            cameraPassthrough ? 0 : 1
-        );
-
-        renderer.setClearAlpha(
-            cameraPassthrough ? 0 : 1
-        );
+        // Transparence du rendu WebGL, sans option caméra.
+        renderer.setClearColor(0x000000, 0);
+        renderer.setClearAlpha(0);
 
         await renderer.xr.setSession(session);
 
@@ -1841,7 +1679,7 @@ async function enterAR() {
 
         messageElement.textContent =
             enabledFeatures.includes("hand-tracking")
-                ? "Maintiens le geste Rock avec la main gauche pour afficher le menu."
+                ? "Fais le geste Rock avec la main gauche pour ouvrir la fenêtre."
                 : "Hand Tracking indisponible.";
 
         console.info(
@@ -1879,6 +1717,10 @@ async function enterAR() {
         if (scene) {
             disposeScene();
         }
+
+        camera = null;
+        session = null;
+        referenceSpace = null;
 
         startButton.disabled = false;
     }
