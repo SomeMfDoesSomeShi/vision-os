@@ -9,15 +9,22 @@ const MIN_DISTANCE = 2;
 const MAX_DISTANCE = 12;
 const DEFAULT_DISTANCE = 6;
 
+const MIN_ARM_SCALE = 0.75;
+const MAX_ARM_SCALE = 1.25;
+const DEFAULT_ARM_SCALE = 1;
+
 const MENU_INTERACTION_DELAY = 1500;
 
 const PINCH_START_DISTANCE = 0.032;
 const PINCH_RELEASE_DISTANCE = 0.055;
 
+const TOUCH_DISTANCE = 0.035;
+const MAX_POINTER_DISTANCE = 2;
+
 const SMOOTHING = 0.32;
 
 const MENU_WIDTH = 0.62;
-const MENU_HEIGHT = 0.66;
+const MENU_HEIGHT = 0.84;
 
 const UPPER_ARM_LENGTH = 0.34;
 const FOREARM_LENGTH = 0.30;
@@ -47,9 +54,9 @@ let isRunning = false;
 let enabledFeatures = [];
 
 let maxDistance = DEFAULT_DISTANCE;
+let armLengthScale = DEFAULT_ARM_SCALE;
 
 let armScanEnabled = true;
-let distanceScanEnabled = true;
 
 let menuOpen = false;
 let menuInteractionUnlockTime = 0;
@@ -57,6 +64,12 @@ let menuInteractionUnlockTime = 0;
 let pinchWasActive = false;
 let pinchActive = false;
 let activeTouch = null;
+
+let lastPointingLocal = null;
+let frozenPinchLocal = null;
+let previousTouchTarget = null;
+
+let rockWasActive = false;
 
 let menuGroup = null;
 let menuButtons = [];
@@ -149,6 +162,19 @@ function setSensitivity(value) {
 
     messageElement.textContent =
         `Portée du scan : ${maxDistance.toFixed(1)} m`;
+}
+
+function setArmLength(value) {
+    armLengthScale = THREE.MathUtils.clamp(
+        value,
+        MIN_ARM_SCALE,
+        MAX_ARM_SCALE
+    );
+
+    updateMenu();
+
+    messageElement.textContent =
+        `Longueur des bras : ${Math.round(armLengthScale * 100)} %`;
 }
 
 // ======================================================
@@ -253,7 +279,7 @@ function detectLeftRock(frame) {
 }
 
 // ======================================================
-// TEXTURES
+// TEXTURES DU MENU
 // ======================================================
 
 function createTextTexture(title, subtitle = "", selected = false) {
@@ -296,9 +322,26 @@ function createMenuMaterial(texture) {
     return new THREE.MeshBasicMaterial({
         map: texture,
         side: THREE.DoubleSide,
-        depthTest: false,
+
+        // Important : le menu doit respecter le Z-buffer.
+        // Les objets et les mains devant lui le masqueront.
+        depthTest: true,
         depthWrite: false
     });
+}
+
+function createMenuText(title, subtitle, y, width = 0.53, height = 0.075) {
+    const mesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(width, height),
+        createMenuMaterial(
+            createTextTexture(title, subtitle)
+        )
+    );
+
+    mesh.position.set(0, y, 0.025);
+    menuGroup.add(mesh);
+
+    return mesh;
 }
 
 // ======================================================
@@ -313,7 +356,7 @@ function createMenuButton(label, subtitle, action, y) {
         )
     );
 
-    button.position.set(0, y, 0.025);
+    button.position.set(0, y, 0.035);
 
     button.userData.action = action;
     button.userData.defaultTitle = label;
@@ -361,10 +404,53 @@ function createCloseButton() {
     closeButton.position.set(
         MENU_WIDTH / 2 - 0.055,
         MENU_HEIGHT / 2 - 0.055,
-        0.04
+        0.045
     );
 
     menuGroup.add(closeButton);
+}
+
+// ======================================================
+// SLIDERS
+// ======================================================
+
+function createSlider(y, name) {
+    const background = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.47, 0.018),
+        new THREE.MeshBasicMaterial({
+            color: 0x30465d,
+            side: THREE.DoubleSide,
+            depthTest: true,
+            depthWrite: false
+        })
+    );
+
+    background.position.set(0, y, 0.04);
+    background.userData.sliderName = name;
+
+    menuGroup.add(background);
+
+    const fill = new THREE.Mesh(
+        new THREE.PlaneGeometry(1, 0.018),
+        new THREE.MeshBasicMaterial({
+            color: 0x5cf0c0,
+            side: THREE.DoubleSide,
+            depthTest: true,
+            depthWrite: false
+        })
+    );
+
+    fill.position.set(-0.235, y, 0.045);
+    fill.scale.x = 0.01;
+
+    menuGroup.add(fill);
+
+    return {
+        background,
+        fill,
+        y,
+        name
+    };
 }
 
 // ======================================================
@@ -376,80 +462,45 @@ function createMenu() {
 
     menuGroup = new THREE.Group();
 
-    // Aucun grand rectangle noir derrière le menu.
-    const title = new THREE.Mesh(
-        new THREE.PlaneGeometry(0.53, 0.09),
-        createMenuMaterial(
-            createTextTexture(
-                "QUEST SCANNER",
-                "Controle gestuel"
-            )
-        )
+    createMenuText(
+        "QUEST SCANNER",
+        "Controle gestuel",
+        0.34
     );
-
-    title.position.set(0, 0.27, 0.035);
-    menuGroup.add(title);
 
     createCloseButton();
 
-    createMenuButton(
-        "SENSIBILITE",
-        "Regler la portee du scan",
-        "sensitivity",
-        0.145
+    createMenuText(
+        `SENSIBILITE : ${maxDistance.toFixed(1)} m`,
+        "Toucher ou pincer sur la barre",
+        0.22
     );
 
-    createMenuButton(
-        "ACTUALISER LE SCAN",
-        "Demander une capture Meta",
-        "rescan",
-        -0.015
+    createMenuText(
+        `LONGUEUR DES BRAS : ${Math.round(armLengthScale * 100)} %`,
+        "Ajuster la longueur estimee",
+        0.015
     );
 
     createMenuButton(
         "MAINS / BRAS",
         "Afficher ou masquer l'estimation",
         "arms",
-        -0.13
+        -0.16
     );
 
     createMenuButton(
-        "SCAN DES DISTANCES",
-        "Afficher ou masquer le scan",
-        "distance",
-        -0.245
+        "ACTUALISER LE SCAN",
+        "Demander une capture Meta",
+        "rescan",
+        -0.285
     );
 
-    // Slider de sensibilité.
-    const sliderBackground = new THREE.Mesh(
-        new THREE.PlaneGeometry(0.47, 0.018),
-        new THREE.MeshBasicMaterial({
-            color: 0x30465d,
-            side: THREE.DoubleSide,
-            depthTest: false,
-            depthWrite: false
-        })
-    );
+    menuGroup.userData.sensitivitySlider =
+        createSlider(0.135, "sensitivity");
 
-    sliderBackground.position.set(0, 0.075, 0.04);
-    menuGroup.add(sliderBackground);
-
-    const sliderFill = new THREE.Mesh(
-        new THREE.PlaneGeometry(1, 0.018),
-        new THREE.MeshBasicMaterial({
-            color: 0x5cf0c0,
-            side: THREE.DoubleSide,
-            depthTest: false,
-            depthWrite: false
-        })
-    );
-
-    sliderFill.position.set(-0.235, 0.075, 0.045);
-    sliderFill.scale.x = 0.01;
-
-    menuGroup.add(sliderFill);
-
-    menuGroup.userData.sliderFill = sliderFill;
+    menuGroup.userData.armSlider =
+        createSlider(-0.075, "armLength");
 
     scene.add(menuGroup);
 
@@ -459,7 +510,7 @@ function createMenu() {
 }
 
 // ======================================================
-// APPARENCE DES BOUTONS
+// APPARENCE ET VALEURS DU MENU
 // ======================================================
 
 function updateButtonAppearance(button, selected) {
@@ -478,18 +529,13 @@ function updateButtonAppearance(button, selected) {
             ? "MAINS / BRAS : ON"
             : "MAINS / BRAS : OFF",
 
-        distance: distanceScanEnabled
-            ? "DISTANCES : ON"
-            : "DISTANCES : OFF",
-
-        sensitivity:
-            `SENSIBILITE : ${maxDistance.toFixed(1)} m`
+        rescan: "ACTUALISER LE SCAN"
     };
 
     button.material.map = createTextTexture(
         titles[action] || button.userData.defaultTitle,
         selected
-            ? "Pince pour selectionner"
+            ? "Index en contact"
             : button.userData.subtitle,
         selected
     );
@@ -497,20 +543,67 @@ function updateButtonAppearance(button, selected) {
     button.material.needsUpdate = true;
 }
 
+function updateSliderVisual(slider, ratio) {
+    if (!slider) return;
+
+    ratio = THREE.MathUtils.clamp(ratio, 0, 1);
+
+    slider.fill.scale.x = Math.max(0.01, ratio);
+
+    slider.fill.position.x =
+        -0.235 + ratio * 0.235;
+}
+
 function updateMenu() {
     if (!menuGroup) return;
 
-    const slider = menuGroup.userData.sliderFill;
+    const sensitivitySlider =
+        menuGroup.userData.sensitivitySlider;
 
-    if (slider) {
-        const ratio =
-            (maxDistance - MIN_DISTANCE) /
-            (MAX_DISTANCE - MIN_DISTANCE);
+    const armSlider =
+        menuGroup.userData.armSlider;
 
-        slider.scale.x = Math.max(0.01, ratio);
+    const sensitivityRatio =
+        (maxDistance - MIN_DISTANCE) /
+        (MAX_DISTANCE - MIN_DISTANCE);
 
-        slider.position.x =
-            -0.235 + ratio * 0.235;
+    const armRatio =
+        (armLengthScale - MIN_ARM_SCALE) /
+        (MAX_ARM_SCALE - MIN_ARM_SCALE);
+
+    updateSliderVisual(
+        sensitivitySlider,
+        sensitivityRatio
+    );
+
+    updateSliderVisual(
+        armSlider,
+        armRatio
+    );
+
+    // Met à jour les textes des réglages.
+    const textMeshes = menuGroup.children.filter(
+        child => child.userData.isSettingLabel
+    );
+
+    for (const mesh of textMeshes) {
+        if (mesh.material.map) {
+            mesh.material.map.dispose();
+        }
+
+        const isSensitivity =
+            mesh.userData.settingType === "sensitivity";
+
+        mesh.material.map = createTextTexture(
+            isSensitivity
+                ? `SENSIBILITE : ${maxDistance.toFixed(1)} m`
+                : `LONGUEUR DES BRAS : ${Math.round(armLengthScale * 100)} %`,
+            isSensitivity
+                ? "Toucher ou pincer sur la barre"
+                : "Ajuster la longueur estimee"
+        );
+
+        mesh.material.needsUpdate = true;
     }
 
     for (const button of menuButtons) {
@@ -556,8 +649,7 @@ function placeMenuAtWrist(frame, viewerPose) {
         .addScaledVector(up, 0.30)
         .addScaledVector(forward, 0.08);
 
-    // Position enregistrée une seule fois.
-    // Elle n'est jamais recalculée à partir du poignet.
+    // Position et orientation enregistrées une seule fois.
     menuGroup.position.copy(position);
     menuGroup.quaternion.copy(headQuaternion);
 
@@ -599,6 +691,7 @@ function getRightIndexRay(frame) {
 
     return {
         source: rightHand,
+        tip,
         origin: tip,
         direction
     };
@@ -636,13 +729,53 @@ function getIndexMenuIntersection(frame) {
 
     if (!hit) return null;
 
+    // Un doigt derrière le menu ne peut pas le sélectionner.
+    const signedDistance = normal.dot(
+        rayData.origin.clone().sub(menuGroup.position)
+    );
+
+    if (signedDistance < -0.015) return null;
+
     const distance = rayData.origin.distanceTo(intersection);
 
-    if (distance > 2.0) return null;
+    if (distance > MAX_POINTER_DISTANCE) return null;
 
     const local = menuGroup.worldToLocal(
         intersection.clone()
     );
+
+    if (
+        Math.abs(local.x) > MENU_WIDTH / 2 ||
+        Math.abs(local.y) > MENU_HEIGHT / 2
+    ) {
+        return null;
+    }
+
+    return local;
+}
+
+// ======================================================
+// CONTACT TACTILE DIRECT DE L'INDEX
+// ======================================================
+
+function getIndexTouchPoint(frame) {
+    if (!menuGroup?.visible) return null;
+
+    const rayData = getRightIndexRay(frame);
+
+    if (!rayData) return null;
+
+    menuGroup.updateMatrixWorld(true);
+
+    // On utilise directement le bout de l'index.
+    const local = menuGroup.worldToLocal(
+        rayData.tip.clone()
+    );
+
+    // Le bout du doigt doit être très proche du plan du menu.
+    if (Math.abs(local.z) > TOUCH_DISTANCE) {
+        return null;
+    }
 
     if (
         Math.abs(local.x) > MENU_WIDTH / 2 ||
@@ -698,6 +831,10 @@ function isPinching(frame, source) {
     return pinchActive;
 }
 
+// ======================================================
+// DÉTECTION DES ÉLÉMENTS DU MENU
+// ======================================================
+
 function getButtonAtPoint(local) {
     if (!local) return null;
 
@@ -724,11 +861,26 @@ function isCloseButtonAtPoint(local) {
     );
 }
 
-function isSliderAtPoint(local) {
-    return !!local &&
-        local.y >= 0.065 &&
-        local.y <= 0.085 &&
-        Math.abs(local.x) <= 0.245;
+function getSliderAtPoint(local) {
+    if (!local) return null;
+
+    if (
+        local.y >= 0.125 &&
+        local.y <= 0.145 &&
+        Math.abs(local.x) <= 0.245
+    ) {
+        return "sensitivity";
+    }
+
+    if (
+        local.y >= -0.085 &&
+        local.y <= -0.065 &&
+        Math.abs(local.x) <= 0.245
+    ) {
+        return "armLength";
+    }
+
+    return null;
 }
 
 function changeSensitivityFromPoint(local) {
@@ -744,6 +896,48 @@ function changeSensitivityFromPoint(local) {
     );
 }
 
+function changeArmLengthFromPoint(local) {
+    const ratio = THREE.MathUtils.clamp(
+        (local.x + 0.235) / 0.47,
+        0,
+        1
+    );
+
+    setArmLength(
+        MIN_ARM_SCALE +
+        ratio * (MAX_ARM_SCALE - MIN_ARM_SCALE)
+    );
+}
+
+function activateAtPoint(local) {
+    if (!local) return;
+
+    if (isCloseButtonAtPoint(local)) {
+        closeMenu();
+        return;
+    }
+
+    const slider = getSliderAtPoint(local);
+
+    if (slider === "sensitivity") {
+        changeSensitivityFromPoint(local);
+        activeTouch = "sensitivity";
+        return;
+    }
+
+    if (slider === "armLength") {
+        changeArmLengthFromPoint(local);
+        activeTouch = "armLength";
+        return;
+    }
+
+    const button = getButtonAtPoint(local);
+
+    if (button) {
+        activateMenuAction(button.userData.action);
+    }
+}
+
 // ======================================================
 // INTERACTION DU MENU
 // ======================================================
@@ -757,6 +951,9 @@ function updateMenuInteraction(frame, time) {
         pinchWasActive = false;
         pinchActive = false;
         activeTouch = null;
+        frozenPinchLocal = null;
+        lastPointingLocal = null;
+        previousTouchTarget = null;
 
         for (const button of menuButtons) {
             updateButtonAppearance(button, false);
@@ -765,10 +962,41 @@ function updateMenuInteraction(frame, time) {
         return;
     }
 
-    const pinching = isPinching(frame, rightHand);
-    const local = getIndexMenuIntersection(frame);
+    // Le point de visée est actualisé uniquement avant le pincement.
+    const pointingLocal = getIndexMenuIntersection(frame);
 
-    const hoveredButton = getButtonAtPoint(local);
+    const pinching = isPinching(frame, rightHand);
+
+    if (!pinching && pointingLocal) {
+        lastPointingLocal = pointingLocal.clone();
+    }
+
+    const justPinched =
+        pinching && !pinchWasActive;
+
+    const justReleased =
+        !pinching && pinchWasActive;
+
+    if (justPinched) {
+        // On fige la dernière position connue AVANT le pincement.
+        frozenPinchLocal = lastPointingLocal
+            ? lastPointingLocal.clone()
+            : null;
+    }
+
+    if (justReleased) {
+        frozenPinchLocal = null;
+        activeTouch = null;
+    }
+
+    // Pendant le pincement, le point utilisé ne bouge plus.
+    const interactionPoint = pinching
+        ? frozenPinchLocal
+        : pointingLocal;
+
+    const hoveredButton = getButtonAtPoint(
+        interactionPoint
+    );
 
     for (const button of menuButtons) {
         updateButtonAppearance(
@@ -777,40 +1005,61 @@ function updateMenuInteraction(frame, time) {
         );
     }
 
-    const justPinched =
-        pinching && !pinchWasActive;
-
     if (time < menuInteractionUnlockTime) {
         pinchWasActive = pinching;
         return;
     }
 
-    if (justPinched && local) {
-        if (isCloseButtonAtPoint(local)) {
-            closeMenu();
-            return;
-        }
-
-        if (isSliderAtPoint(local)) {
-            activeTouch = "sensitivity";
-            changeSensitivityFromPoint(local);
-        } else if (hoveredButton) {
-            activeTouch = hoveredButton.userData.action;
-            activateMenuAction(activeTouch);
-        }
+    // Interaction par pincement : une seule activation au début.
+    if (justPinched && frozenPinchLocal) {
+        activateAtPoint(frozenPinchLocal);
     }
 
-    if (
-        pinching &&
-        activeTouch === "sensitivity" &&
-        local &&
-        isSliderAtPoint(local)
-    ) {
-        changeSensitivityFromPoint(local);
-    }
-
+    // Interaction tactile : l'index touche directement le menu.
     if (!pinching) {
-        activeTouch = null;
+        const touchLocal = getIndexTouchPoint(frame);
+
+        let currentTarget = null;
+
+        if (touchLocal) {
+            if (isCloseButtonAtPoint(touchLocal)) {
+                currentTarget = "close";
+            } else {
+                const slider = getSliderAtPoint(touchLocal);
+                const button = getButtonAtPoint(touchLocal);
+
+                currentTarget = slider ||
+                    button?.userData.action ||
+                    null;
+            }
+
+            // Les sliders suivent le doigt pendant le contact.
+            if (currentTarget === "sensitivity") {
+                changeSensitivityFromPoint(touchLocal);
+            } else if (currentTarget === "armLength") {
+                changeArmLengthFromPoint(touchLocal);
+            }
+
+            // Un bouton n'est activé qu'à l'entrée du contact.
+            if (
+                currentTarget &&
+                currentTarget !== "sensitivity" &&
+                currentTarget !== "armLength" &&
+                currentTarget !== previousTouchTarget
+            ) {
+                activateAtPoint(touchLocal);
+            }
+
+            if (
+                currentTarget === "close" &&
+                currentTarget !== previousTouchTarget
+            ) {
+                closeMenu();
+                return;
+            }
+        }
+
+        previousTouchTarget = currentTarget;
     }
 
     pinchWasActive = pinching;
@@ -835,19 +1084,6 @@ function activateMenuAction(action) {
                 armScanEnabled
                     ? "Estimation des mains active."
                     : "Estimation des mains masquee.";
-
-            break;
-
-        case "distance":
-            distanceScanEnabled = !distanceScanEnabled;
-
-            updateMenu();
-            updateScanVisibility();
-
-            messageElement.textContent =
-                distanceScanEnabled
-                    ? "Scan des distances active."
-                    : "Scan des distances masque.";
 
             break;
     }
@@ -878,8 +1114,12 @@ function openMenu(frame, viewerPose, time) {
     pinchActive = false;
     activeTouch = null;
 
+    lastPointingLocal = null;
+    frozenPinchLocal = null;
+    previousTouchTarget = null;
+
     messageElement.textContent =
-        "Menu place. Tu peux maintenant utiliser ton index et pincer.";
+        "Menu place. Touche avec l'index ou pince pour selectionner.";
 }
 
 function closeMenu() {
@@ -893,16 +1133,25 @@ function closeMenu() {
     pinchActive = false;
     activeTouch = null;
 
+    lastPointingLocal = null;
+    frozenPinchLocal = null;
+    previousTouchTarget = null;
+
     messageElement.textContent =
         "Menu ferme. Fais le geste Rock pour le replacer.";
 }
 
 function updateMenuState(frame, viewerPose, time) {
-    if (!menuOpen && detectLeftRock(frame)) {
+    const rock = detectLeftRock(frame);
+
+    // Déclenchement uniquement au début du geste.
+    if (rock && !rockWasActive && !menuOpen) {
         openMenu(frame, viewerPose, time);
     }
 
-    // Le menu n'est jamais repositionné après son apparition.
+    rockWasActive = rock;
+
+    // Le menu reste ancré à son emplacement initial.
     if (menuOpen) {
         updateMenuInteraction(frame, time);
     }
@@ -1039,14 +1288,6 @@ function updateJoint(mesh, position) {
 // CINÉMATIQUE INVERSE DU BRAS
 // ======================================================
 
-// Calcule le coude à partir de :
-// - l'épaule
-// - le poignet
-// - la longueur du bras
-// - la longueur de l'avant-bras
-//
-// Le coude est placé à l'intersection de deux sphères.
-
 function calculateElbow(
     shoulder,
     wrist,
@@ -1055,7 +1296,6 @@ function calculateElbow(
     preferredBend
 ) {
     const direction = wrist.clone().sub(shoulder);
-
     const originalDistance = direction.length();
 
     if (originalDistance < 0.001) {
@@ -1064,38 +1304,43 @@ function calculateElbow(
 
     const axis = direction.normalize();
 
-    // On garde une configuration géométriquement possible.
-    const minimumReach = Math.abs(
-        upperLength - forearmLength
-    ) + 0.005;
+    // Si la pose dépasse la portée possible, les deux segments
+    // sont adaptés ensemble en conservant leur rapport.
+    const maximumReach = upperLength + forearmLength - 0.005;
+    const minimumReach = Math.abs(upperLength - forearmLength) + 0.005;
 
-    const maximumReach =
-        upperLength + forearmLength - 0.005;
+    let effectiveUpper = upperLength;
+    let effectiveForearm = forearmLength;
+
+    if (originalDistance > maximumReach) {
+        const scale = originalDistance / maximumReach;
+        effectiveUpper *= scale;
+        effectiveForearm *= scale;
+    } else if (originalDistance < minimumReach) {
+        const scale = originalDistance / minimumReach;
+        effectiveUpper *= scale;
+        effectiveForearm *= scale;
+    }
 
     const distance = THREE.MathUtils.clamp(
         originalDistance,
-        minimumReach,
-        maximumReach
+        Math.abs(effectiveUpper - effectiveForearm) + 0.001,
+        effectiveUpper + effectiveForearm - 0.001
     );
 
-    // Distance entre l'épaule et la projection du coude
-    // sur l'axe épaule-poignet.
     const along = (
-        upperLength * upperLength -
-        forearmLength * forearmLength +
+        effectiveUpper * effectiveUpper -
+        effectiveForearm * effectiveForearm +
         distance * distance
     ) / (2 * distance);
 
-    // Hauteur du coude par rapport à l'axe.
     const height = Math.sqrt(
         Math.max(
             0,
-            upperLength * upperLength - along * along
+            effectiveUpper * effectiveUpper - along * along
         )
     );
 
-    // Direction préférée de flexion du coude.
-    // On la projette perpendiculairement à l'axe du bras.
     const bend = preferredBend.clone();
 
     bend.addScaledVector(
@@ -1165,8 +1410,10 @@ function createHandVisual() {
         upperArm: createSegment(0.035),
         lowerArm: createSegment(0.027),
 
-        elbow: createJointSphere(0.022),
-        wrist: createJointSphere(0.014),
+        elbow: createJointSphere(0.020),
+
+        // Petite articulation discrète, pas de grosse sphère au poignet.
+        wrist: createJointSphere(0.010),
 
         palm: new THREE.Mesh(
             new THREE.SphereGeometry(1, 20, 16),
@@ -1188,7 +1435,7 @@ function ensureFingerVisuals(visual) {
         const joints = [];
 
         for (let j = 1; j < chain.length; j++) {
-            const radius = f === 0 ? 0.013 : 0.012;
+            const radius = f === 0 ? 0.012 : 0.011;
 
             segments.push(createSegment(radius));
             joints.push(createJointSphere(radius));
@@ -1201,9 +1448,9 @@ function ensureFingerVisuals(visual) {
     scene.add(visual.palm);
 
     visual.palm.scale.set(
-        0.050,
-        0.060,
-        0.022
+        0.043,
+        0.052,
+        0.018
     );
 
     visual.palm.userData.initialized = false;
@@ -1245,8 +1492,7 @@ function updateHandArm(
         return;
     }
 
-    // Position de l'épaule :
-    // légèrement en dessous et sur le côté du casque.
+    // Épaules estimées sous et de chaque côté du casque.
     const shoulderOffset = new THREE.Vector3(
         key === "left"
             ? -SHOULDER_SIDE_OFFSET
@@ -1262,8 +1508,7 @@ function updateHandArm(
     const shoulder = viewerPosition.clone()
         .add(shoulderOffset);
 
-    // Direction préférée du coude :
-    // légèrement vers l'extérieur et vers l'avant.
+    // Direction préférée de flexion du coude.
     const outward = new THREE.Vector3(
         key === "left" ? -1 : 1,
         0,
@@ -1277,26 +1522,11 @@ function updateHandArm(
         .multiplyScalar(0.65)
         .addScaledVector(forward, 0.75);
 
-    // Longueurs anatomiques estimées.
-    let upperLength = UPPER_ARM_LENGTH;
-    let forearmLength = FOREARM_LENGTH;
+    const upperLength =
+        UPPER_ARM_LENGTH * armLengthScale;
 
-    // Si la distance épaule-poignet dépasse la portée,
-    // on adapte les deux longueurs proportionnellement.
-    // Le rapport entre bras et avant-bras reste constant.
-    const shoulderWristDistance =
-        shoulder.distanceTo(wrist);
-
-    const maximumLength =
-        upperLength + forearmLength - 0.005;
-
-    if (shoulderWristDistance > maximumLength) {
-        const ratio =
-            shoulderWristDistance / maximumLength;
-
-        upperLength *= ratio;
-        forearmLength *= ratio;
-    }
+    const forearmLength =
+        FOREARM_LENGTH * armLengthScale;
 
     const elbow = calculateElbow(
         shoulder,
@@ -1522,7 +1752,7 @@ function updatePlane(plane, frame) {
 
     visual.group.matrix.fromArray(pose.transform.matrix);
     visual.group.matrixWorldNeedsUpdate = true;
-    visual.group.visible = distanceScanEnabled;
+    visual.group.visible = true;
 
     return getWorldCenter(visual);
 }
@@ -1625,7 +1855,7 @@ function updateDetectedMesh(xrMesh, frame) {
 
     visual.group.matrix.fromArray(pose.transform.matrix);
     visual.group.matrixWorldNeedsUpdate = true;
-    visual.group.visible = distanceScanEnabled;
+    visual.group.visible = true;
 
     return getWorldCenter(visual);
 }
@@ -1638,20 +1868,6 @@ function getWorldCenter(visual) {
     return sphere.center.clone().applyMatrix4(
         visual.group.matrix
     );
-}
-
-// ======================================================
-// VISIBILITÉ DU SCAN
-// ======================================================
-
-function updateScanVisibility() {
-    for (const visual of planeVisuals.values()) {
-        visual.group.visible = distanceScanEnabled;
-    }
-
-    for (const visual of meshVisuals.values()) {
-        visual.group.visible = distanceScanEnabled;
-    }
 }
 
 // ======================================================
@@ -1755,7 +1971,7 @@ function renderFrame(time, frame) {
     for (const plane of planes) {
         const center = updatePlane(plane, frame);
 
-        if (center && distanceScanEnabled) {
+        if (center) {
             nearestDistance = Math.min(
                 nearestDistance,
                 viewerPosition.distanceTo(center)
@@ -1766,7 +1982,7 @@ function renderFrame(time, frame) {
     for (const xrMesh of meshes) {
         const center = updateDetectedMesh(xrMesh, frame);
 
-        if (center && distanceScanEnabled) {
+        if (center) {
             nearestDistance = Math.min(
                 nearestDistance,
                 viewerPosition.distanceTo(center)
@@ -1778,7 +1994,7 @@ function renderFrame(time, frame) {
         planeVisuals.size + meshVisuals.size;
 
     nearestDistanceElement.textContent =
-        distanceScanEnabled && Number.isFinite(nearestDistance)
+        Number.isFinite(nearestDistance)
             ? nearestDistance.toFixed(2)
             : "—";
 
@@ -1836,6 +2052,7 @@ function stopAR() {
         `Plans : ${planeVisuals.size}\n` +
         `Maillages : ${meshVisuals.size}\n` +
         `Portée : ${maxDistance.toFixed(1)} m\n` +
+        `Longueur des bras : ${Math.round(armLengthScale * 100)} %\n` +
         `Fonctionnalités : ${enabledFeatures.join(", ") || "non communiquées"}`;
 
     console.info("RAPPORT FINAL DU SCAN\n" + report);
@@ -1860,6 +2077,11 @@ function stopAR() {
     pinchWasActive = false;
     pinchActive = false;
     activeTouch = null;
+
+    lastPointingLocal = null;
+    frozenPinchLocal = null;
+    previousTouchTarget = null;
+    rockWasActive = false;
 
     document.body.classList.remove("xr-active");
 
@@ -1886,11 +2108,17 @@ async function enterAR() {
     roomCaptureStatus = "En attente";
 
     maxDistance = DEFAULT_DISTANCE;
+    armLengthScale = DEFAULT_ARM_SCALE;
 
     menuOpen = false;
     pinchWasActive = false;
     pinchActive = false;
     activeTouch = null;
+
+    lastPointingLocal = null;
+    frozenPinchLocal = null;
+    previousTouchTarget = null;
+    rockWasActive = false;
 
     try {
         session = await navigator.xr.requestSession(
@@ -1956,7 +2184,6 @@ async function enterAR() {
 
         renderer.xr.setReferenceSpaceType(referenceType);
 
-        // Transparence WebXR originale.
         renderer.setClearColor(0x000000, 0);
         renderer.setClearAlpha(0);
 
